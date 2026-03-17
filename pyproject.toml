@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=80.10.2", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "firecloud-py"
+version = "0.1.0"
+description = "Local-cluster distributed storage prototype with RaptorQ and Textual TUI"
+requires-python = ">=3.12"
+dependencies = [
+  "setuptools>=80.10.2,<81",
+  "fastapi>=0.116.0",
+  "uvicorn>=0.35.0",
+  "textual>=6.2.1",
+  "blake3>=1.0.8",
+  "pynacl>=1.6.0",
+  "cryptography>=46.0.1",
+  "libraptorq>=0.1.9",
+  "pydantic>=2.11.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.2",
+  "httpx>=0.28.0",
+]
+
+[project.scripts]
+firecloud = "firecloud.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
