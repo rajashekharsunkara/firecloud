@@ -59,3 +59,15 @@ def test_raptorq_roundtrip_empty_payload() -> None:
     selected = {sid: encoded.symbols[sid] for sid in range(codec.source_symbols)}
     decoded = codec.decode(selected, original_size=0)
     assert decoded == b""
+
+
+def test_fec_fallback_path_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
+    import firecloud.fec as fec_module
+
+    monkeypatch.setattr(fec_module, "_HAS_PYRAPTORQ", False)
+    codec = fec_module.RaptorQCodec(source_symbols=3, total_symbols=5, symbol_size=128)
+    payload = os.urandom(codec.payload_size - 11)
+    encoded = codec.encode(payload)
+    selected = {sid: encoded.symbols[sid] for sid in [0, 2, 4]}
+    decoded = codec.decode(selected, original_size=len(payload))
+    assert decoded == payload
