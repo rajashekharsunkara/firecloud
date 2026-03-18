@@ -64,6 +64,25 @@ def test_unknown_node_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
+def test_add_and_remove_node_endpoints(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    node_root = tmp_path / "node-extra"
+    node_root.mkdir(parents=True, exist_ok=True)
+
+    add = client.post(
+        "/nodes/add",
+        json={"node_id": "node-extra", "endpoint": str(node_root), "kind": "local"},
+    )
+    assert add.status_code == 200
+
+    nodes = client.get("/nodes")
+    assert nodes.status_code == 200
+    assert any(item["node_id"] == "node-extra" for item in nodes.json())
+
+    remove = client.delete("/nodes/node-extra")
+    assert remove.status_code == 200
+
+
 def test_repair_unknown_file_returns_400(tmp_path: Path) -> None:
     client = _client(tmp_path)
     response = client.post("/files/missing/repair")

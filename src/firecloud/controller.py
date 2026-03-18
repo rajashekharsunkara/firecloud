@@ -17,12 +17,16 @@ from .crypto import (
 from .fec import RaptorQCodec
 from .hashing import blake3_hex
 from .metadata import AuditEvent, ChunkRecord, FileRecord, MetadataStore
-from .storage import NodeStore
+from .models import NodeDescriptor
+from .storage_client import StorageClient
+from .transport import TransportError
 
 
 @dataclass(frozen=True)
 class NodeStatusView:
     node_id: str
+    endpoint: str
+    kind: str
     online: bool
     symbol_count: int
 
@@ -38,8 +42,14 @@ class FireCloudController:
         )
         self.metadata = MetadataStore(self.config.db_path)
         self.master_key = self._load_or_create_master_key(self.config.master_key_path)
-        self.nodes: dict[str, NodeStore] = {}
+        self.storage_client = StorageClient(nodes=self._configured_nodes())
         self._initialize_nodes()
+
+    def _configured_nodes(self) -> list[NodeDescriptor]:
+        return [
+            NodeDescriptor(node_id=node.node_id, endpoint=node.endpoint, kind=node.kind)
+            for node in self.config.node_definitions()
+        ]
 
     def _load_or_create_master_key(self, key_path: Path) -> bytes:
         if key_path.exists():
@@ -53,13 +63,29 @@ class FireCloudController:
         return key
 
     def _initialize_nodes(self) -> None:
-        for idx in range(1, self.config.node_count + 1):
-            node_id = f"node-{idx}"
-            self.nodes[node_id] = NodeStore(node_id=node_id, root_dir=self.config.node_data_dir(node_id))
-            self.metadata.upsert_node(node_id, "online")
+        for node in self.storage_client.list_nodes():
+            self.metadata.upsert_node(
+                node_id=node.node_id,
+                status="online",
+                endpoint=node.endpoint,
+                kind=node.kind,
+            )
+        for row in self.metadata.list_nodes():
+            if self.storage_client.has_node(row.node_id):
+                continue
+            try:
+                self.storage_client.upsert_node(
+                    NodeDescriptor(node_id=row.node_id, endpoint=row.endpoint, kind=row.kind)
+                )
+            except ValueError:
+                continue
 
     def _online_node_ids(self) -> list[str]:
-        return [node.node_id for node in self.metadata.list_nodes() if node.online]
+        return [
+            node.node_id
+            for node in self.metadata.list_nodes()
+            if node.online and self.storage_client.has_node(node.node_id)
+        ]
 
     @staticmethod
     def _canonical_payload(payload: dict[str, object]) -> str:
@@ -80,23 +106,51 @@ class FireCloudController:
         node_rows = self.metadata.list_nodes()
         result: list[NodeStatusView] = []
         for row in node_rows:
-            if row.node_id not in self.nodes:
+            if not self.storage_client.has_node(row.node_id):
                 continue
+            symbol_count = 0
+            try:
+                symbol_count = self.storage_client.symbol_count(row.node_id)
+            except (ValueError, TransportError):
+                symbol_count = 0
             result.append(
                 NodeStatusView(
                     node_id=row.node_id,
+                    endpoint=row.endpoint,
+                    kind=row.kind,
                     online=row.online,
-                    symbol_count=self.nodes[row.node_id].symbol_count(),
+                    symbol_count=symbol_count,
                 )
             )
         return result
 
     def set_node_online(self, node_id: str, online: bool) -> None:
-        if node_id not in self.nodes:
+        if self.metadata.get_node(node_id) is None:
             raise ValueError(f"Unknown node: {node_id}")
         status = "online" if online else "offline"
         self.metadata.set_node_status(node_id, status)
         self._append_audit_event("node_status_changed", {"node_id": node_id, "status": status})
+
+    def add_node(self, node_id: str, endpoint: str, kind: str = "local") -> None:
+        descriptor = NodeDescriptor(node_id=node_id, endpoint=endpoint, kind=kind)
+        self.storage_client.upsert_node(descriptor)
+        self.metadata.upsert_node(
+            node_id=descriptor.node_id,
+            status="online",
+            endpoint=descriptor.endpoint,
+            kind=descriptor.kind,
+        )
+        self._append_audit_event(
+            "node_added",
+            {"node_id": descriptor.node_id, "endpoint": descriptor.endpoint, "kind": descriptor.kind},
+        )
+
+    def remove_node(self, node_id: str) -> None:
+        if self.metadata.get_node(node_id) is None:
+            raise ValueError(f"Unknown node: {node_id}")
+        self.storage_client.remove_node(node_id)
+        self.metadata.remove_node(node_id)
+        self._append_audit_event("node_removed", {"node_id": node_id})
 
     def list_files(self) -> list[FileRecord]:
         return self.metadata.list_files()
@@ -132,8 +186,11 @@ class FireCloudController:
             )
             for symbol_id, symbol_data in encoded_chunk.symbols.items():
                 target_node = online_nodes[(chunk_index + symbol_id) % len(online_nodes)]
-                relative_path = self.nodes[target_node].put_symbol(
-                    chunk_id=chunk_id, symbol_id=symbol_id, symbol_data=symbol_data
+                relative_path = self.storage_client.put_symbol(
+                    node_id=target_node,
+                    chunk_id=chunk_id,
+                    symbol_id=symbol_id,
+                    symbol_data=symbol_data,
                 )
                 self.metadata.add_symbol(
                     chunk_id=chunk_id,
@@ -161,12 +218,16 @@ class FireCloudController:
                 continue
             if not node_state.get(symbol.node_id, False):
                 continue
-            node_store = self.nodes.get(symbol.node_id)
-            if node_store is None:
+            if not self.storage_client.has_node(symbol.node_id):
                 continue
-            if not node_store.has_symbol(symbol.symbol_path):
+            try:
+                if not self.storage_client.has_symbol(symbol.node_id, symbol.symbol_path):
+                    continue
+                collected[symbol.symbol_id] = self.storage_client.get_symbol(
+                    symbol.node_id, symbol.symbol_path
+                )
+            except (TransportError, FileNotFoundError, ValueError):
                 continue
-            collected[symbol.symbol_id] = node_store.get_symbol(symbol.symbol_path)
         return collected
 
     def download_file(self, file_id: str, destination_path: Path) -> Path:
@@ -223,8 +284,11 @@ class FireCloudController:
                 if symbol_id in existing_symbol_ids:
                     continue
                 target_node = online_nodes[(chunk.chunk_index + symbol_id) % len(online_nodes)]
-                relative_path = self.nodes[target_node].put_symbol(
-                    chunk_id=chunk.chunk_id, symbol_id=symbol_id, symbol_data=symbol_data
+                relative_path = self.storage_client.put_symbol(
+                    node_id=target_node,
+                    chunk_id=chunk.chunk_id,
+                    symbol_id=symbol_id,
+                    symbol_data=symbol_data,
                 )
                 self.metadata.add_symbol(
                     chunk_id=chunk.chunk_id,
@@ -261,3 +325,6 @@ class FireCloudController:
                 )
             prev_hash = event.event_hash
         return True, f"Audit chain verified ({len(events)} events)"
+
+    def local_symbol_path(self, node_id: str, symbol_path: str) -> Path | None:
+        return self.storage_client.local_symbol_path(node_id=node_id, symbol_path=symbol_path)

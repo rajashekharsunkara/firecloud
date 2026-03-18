@@ -70,3 +70,20 @@ def test_cli_invalid_config_fails(tmp_path: Path) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     assert result.returncode != 0
     assert "node_count must be >= total_symbols" in result.stderr
+
+
+def test_cli_node_add_and_remove(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    state = tmp_path / "state"
+    node_root = tmp_path / "node-extra"
+    node_root.mkdir(parents=True, exist_ok=True)
+
+    add = _run_cli(project_root, state, "node-add", "node-extra", str(node_root), "--kind", "local")
+    assert add.returncode == 0, add.stderr
+
+    listing = _run_cli(project_root, state, "list-nodes")
+    assert listing.returncode == 0, listing.stderr
+    assert "node-extra" in listing.stdout
+
+    remove = _run_cli(project_root, state, "node-remove", "node-extra")
+    assert remove.returncode == 0, remove.stderr

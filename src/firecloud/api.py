@@ -16,6 +16,12 @@ class DownloadRequest(BaseModel):
     destination: str = Field(..., description="Destination path for restored file")
 
 
+class AddNodeRequest(BaseModel):
+    node_id: str = Field(..., description="Node identifier")
+    endpoint: str = Field(..., description="Node endpoint/path")
+    kind: str = Field(default="local", description="Node kind: local or http")
+
+
 def create_api(controller: FireCloudController) -> FastAPI:
     app = FastAPI(title="FireCloud Python MVP", version="0.1.0")
 
@@ -58,11 +64,33 @@ def create_api(controller: FireCloudController) -> FastAPI:
         return [
             {
                 "node_id": node.node_id,
+                "endpoint": node.endpoint,
+                "kind": node.kind,
                 "online": node.online,
                 "symbol_count": node.symbol_count,
             }
             for node in controller.list_nodes()
         ]
+
+    @app.post("/nodes/add")
+    def add_node(payload: AddNodeRequest) -> dict[str, str]:
+        try:
+            controller.add_node(
+                node_id=payload.node_id,
+                endpoint=payload.endpoint,
+                kind=payload.kind,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"node_id": payload.node_id}
+
+    @app.delete("/nodes/{node_id}")
+    def remove_node(node_id: str) -> dict[str, str]:
+        try:
+            controller.remove_node(node_id=node_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"node_id": node_id}
 
     @app.post("/nodes/{node_id}/offline")
     def set_node_offline(node_id: str) -> dict[str, object]:

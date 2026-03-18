@@ -17,12 +17,12 @@ dependencies = [
   "cryptography>=46.0.1",
   "libraptorq>=0.1.9",
   "pydantic>=2.11.9",
+  "httpx>=0.28.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.4.2",
-  "httpx>=0.28.0",
 ]
 
 [project.scripts]

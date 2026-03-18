@@ -16,10 +16,11 @@ def test_metadata_crud_and_audit(tmp_path: Path) -> None:
     db_path = tmp_path / "meta.db"
     metadata = MetadataStore(db_path)
 
-    metadata.upsert_node("node-1", "online")
+    metadata.upsert_node("node-1", "online", endpoint=str(tmp_path / "node-1"), kind="local")
     nodes = metadata.list_nodes()
     assert len(nodes) == 1
     assert nodes[0].online
+    assert nodes[0].kind == "local"
 
     metadata.create_file("file-1", "a.txt", 10)
     file_record = metadata.get_file("file-1")
@@ -51,3 +52,8 @@ def test_metadata_crud_and_audit(tmp_path: Path) -> None:
     events = metadata.list_audit_events(limit=10)
     assert len(events) == 1
     assert events[0].payload["x"] == 1
+
+    fetched = metadata.get_node("node-1")
+    assert fetched is not None
+    metadata.remove_node("node-1")
+    assert metadata.get_node("node-1") is None

@@ -96,7 +96,10 @@ def test_download_fails_if_missing_symbol_with_only_k_nodes_left(tmp_path: Path)
     chunk = controller.metadata.list_chunks(file_id)[0]
     symbols = controller.metadata.list_symbols(chunk.chunk_id)
     online_symbol = next(s for s in symbols if s.node_id in {"node-3", "node-4", "node-5"})
-    symbol_full_path = controller.nodes[online_symbol.node_id].root_dir / online_symbol.symbol_path
+    symbol_full_path = controller.local_symbol_path(
+        online_symbol.node_id, online_symbol.symbol_path
+    )
+    assert symbol_full_path is not None
     symbol_full_path.unlink()
 
     with pytest.raises(RuntimeError):
@@ -161,3 +164,15 @@ def test_controller_state_survives_restart(tmp_path: Path) -> None:
     restored = tmp_path / "restored-restart.bin"
     restarted.download_file(file_id, restored)
     assert restored.read_bytes() == source_path.read_bytes()
+
+
+def test_add_and_remove_node(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    extra_node_path = tmp_path / "extra-node"
+    extra_node_path.mkdir(parents=True, exist_ok=True)
+
+    controller.add_node("node-extra", str(extra_node_path), kind="local")
+    assert any(node.node_id == "node-extra" for node in controller.list_nodes())
+
+    controller.remove_node("node-extra")
+    assert all(node.node_id != "node-extra" for node in controller.list_nodes())

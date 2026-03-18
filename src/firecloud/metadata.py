@@ -39,6 +39,8 @@ class SymbolRecord:
 class NodeRecord:
     node_id: str
     status: str
+    endpoint: str
+    kind: str
     updated_at: str
 
     @property
@@ -113,6 +115,8 @@ class MetadataStore:
                 CREATE TABLE IF NOT EXISTS nodes (
                     node_id TEXT PRIMARY KEY,
                     status TEXT NOT NULL,
+                    endpoint TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'local',
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -129,6 +133,17 @@ class MetadataStore:
                 )
                 """
             )
+            self._ensure_column("nodes", "endpoint", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("nodes", "kind", "TEXT NOT NULL DEFAULT 'local'")
+
+    def _ensure_column(self, table_name: str, column_name: str, definition_sql: str) -> None:
+        rows = self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        if column_name in existing_columns:
+            return
+        self._conn.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition_sql}"
+        )
 
     @staticmethod
     def _utc_now() -> str:
@@ -219,18 +234,34 @@ class MetadataStore:
             ).fetchall()
         return {row["chunk_id"]: row["symbol_count"] for row in rows}
 
-    def upsert_node(self, node_id: str, status: str) -> None:
+    def upsert_node(self, node_id: str, status: str, endpoint: str, kind: str) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO nodes(node_id, status, updated_at)
-                VALUES(?, ?, ?)
+                INSERT INTO nodes(node_id, status, endpoint, kind, updated_at)
+                VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(node_id) DO UPDATE SET
                     status=excluded.status,
+                    endpoint=excluded.endpoint,
+                    kind=excluded.kind,
                     updated_at=excluded.updated_at
                 """,
-                (node_id, status, self._utc_now()),
+                (node_id, status, endpoint, kind, self._utc_now()),
             )
+
+    def remove_node(self, node_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))
+
+    def get_node(self, node_id: str) -> NodeRecord | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT node_id, status, endpoint, kind, updated_at FROM nodes WHERE node_id = ?",
+                (node_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return NodeRecord(**dict(row))
 
     def set_node_status(self, node_id: str, status: str) -> None:
         with self._lock, self._conn:
@@ -242,7 +273,7 @@ class MetadataStore:
     def list_nodes(self) -> list[NodeRecord]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT node_id, status, updated_at FROM nodes ORDER BY node_id ASC"
+                "SELECT node_id, status, endpoint, kind, updated_at FROM nodes ORDER BY node_id ASC"
             ).fetchall()
         return [NodeRecord(**dict(row)) for row in rows]
 

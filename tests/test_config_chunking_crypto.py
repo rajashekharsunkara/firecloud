@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from firecloud.chunking import iter_file_chunks, split_bytes
-from firecloud.config import FECConfig, FireCloudConfig
+from firecloud.config import FECConfig, FireCloudConfig, NodeConfig
 from firecloud.crypto import (
     ENCRYPTION_OVERHEAD,
     KEY_SIZE,
@@ -26,6 +26,21 @@ def test_fec_config_validation() -> None:
 def test_firecloud_config_validation() -> None:
     with pytest.raises(ValueError):
         FireCloudConfig(node_count=2, fec=FECConfig(source_symbols=3, total_symbols=5, symbol_size=128))
+
+    with pytest.raises(ValueError):
+        FireCloudConfig(
+            nodes=(
+                NodeConfig(node_id="node-a", endpoint="/tmp/a", kind="local"),
+                NodeConfig(node_id="node-a", endpoint="/tmp/b", kind="local"),
+            ),
+            fec=FECConfig(source_symbols=3, total_symbols=5, symbol_size=128),
+        )
+
+    with pytest.raises(ValueError):
+        FireCloudConfig(
+            nodes=(NodeConfig(node_id="node-a", endpoint="/tmp/a", kind="local"),),
+            fec=FECConfig(source_symbols=3, total_symbols=5, symbol_size=128),
+        )
 
 
 def test_split_bytes_and_iter_chunks(tmp_path: Path) -> None:

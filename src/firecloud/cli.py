@@ -8,6 +8,7 @@ import uvicorn
 from .api import create_api
 from .config import FECConfig, FireCloudConfig
 from .controller import FireCloudController
+from .storage_api import create_storage_api
 from .tui.app import FireCloudTUI
 
 
@@ -33,6 +34,14 @@ def _build_parser() -> argparse.ArgumentParser:
     set_node.add_argument("node_id")
     set_node.add_argument("status", choices=["online", "offline"])
 
+    add_node = sub.add_parser("node-add", help="Add a node")
+    add_node.add_argument("node_id")
+    add_node.add_argument("endpoint")
+    add_node.add_argument("--kind", default="local", choices=["local", "http"])
+
+    remove_node = sub.add_parser("node-remove", help="Remove a node")
+    remove_node.add_argument("node_id")
+
     repair = sub.add_parser("repair", help="Repair a file's symbol redundancy")
     repair.add_argument("file_id")
 
@@ -43,6 +52,12 @@ def _build_parser() -> argparse.ArgumentParser:
     api = sub.add_parser("run-api", help="Run FastAPI server")
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8080)
+
+    storage_api = sub.add_parser("run-storage-node", help="Run storage-node API")
+    storage_api.add_argument("--node-id", required=True)
+    storage_api.add_argument("--node-root-dir", required=True)
+    storage_api.add_argument("--host", default="127.0.0.1")
+    storage_api.add_argument("--port", type=int, required=True)
 
     sub.add_parser("run-tui", help="Run Textual TUI")
     return parser
@@ -61,6 +76,12 @@ def _controller_from_args(args: argparse.Namespace) -> FireCloudController:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.command == "run-storage-node":
+        app = create_storage_api(node_id=args.node_id, root_dir=Path(args.node_root_dir))
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        return
+
     controller = _controller_from_args(args)
 
     if args.command == "upload":
@@ -75,6 +96,14 @@ def main() -> None:
         controller.set_node_online(args.node_id, args.status == "online")
         print(f"{args.node_id} -> {args.status}")
         return
+    if args.command == "node-add":
+        controller.add_node(node_id=args.node_id, endpoint=args.endpoint, kind=args.kind)
+        print(f"added {args.node_id}")
+        return
+    if args.command == "node-remove":
+        controller.remove_node(args.node_id)
+        print(f"removed {args.node_id}")
+        return
     if args.command == "repair":
         repaired = controller.repair_file(args.file_id)
         print(repaired)
@@ -85,7 +114,10 @@ def main() -> None:
         return
     if args.command == "list-nodes":
         for node in controller.list_nodes():
-            print(f"{node.node_id}\tonline={node.online}\tsymbols={node.symbol_count}")
+            print(
+                f"{node.node_id}\tkind={node.kind}\tendpoint={node.endpoint}\t"
+                f"online={node.online}\tsymbols={node.symbol_count}"
+            )
         return
     if args.command == "verify-audit":
         valid, details = controller.verify_audit_chain()
