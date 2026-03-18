@@ -2274,7 +2274,3 @@ Result: 80% local, 20% remote (for durability)
 
 **Result:**
 Enterprise-grade distributed storage with consumer-grade simplicity.
-
----
-
-*This covers ALL technical aspects. Want deeper dive into any specific component?*
