@@ -27,10 +27,14 @@ def test_health_endpoint(tmp_path: Path) -> None:
 
 def test_upload_download_and_audit_endpoints(tmp_path: Path) -> None:
     client = _client(tmp_path)
-    source = tmp_path / "sample.txt"
-    source.write_text("api-flow-test")
+    payload = b"api-flow-test"
 
-    upload_res = client.post("/files/upload", json={"path": str(source)})
+    upload_res = client.post(
+        "/files/upload",
+        params={"file_name": "sample.txt"},
+        content=payload,
+        headers={"content-type": "application/octet-stream"},
+    )
     assert upload_res.status_code == 200
     file_id = upload_res.json()["file_id"]
 
@@ -38,24 +42,26 @@ def test_upload_download_and_audit_endpoints(tmp_path: Path) -> None:
     assert files.status_code == 200
     assert any(item["file_id"] == file_id for item in files.json())
 
-    destination = tmp_path / "out" / "sample.txt"
-    dl_res = client.post(f"/files/{file_id}/download", json={"destination": str(destination)})
+    dl_res = client.get(f"/files/{file_id}/download")
     assert dl_res.status_code == 200
-    assert destination.read_text() == "api-flow-test"
+    assert dl_res.content == payload
+    assert "attachment; filename=\"sample.txt\"" in dl_res.headers["content-disposition"]
 
     verify = client.get("/audit/verify")
     assert verify.status_code == 200
     assert verify.json()["valid"] is True
 
+    delete = client.delete(f"/files/{file_id}")
+    assert delete.status_code == 200
 
-def test_upload_invalid_path_returns_400(tmp_path: Path) -> None:
+
+def test_upload_requires_file_name_and_body(tmp_path: Path) -> None:
     client = _client(tmp_path)
-    response = client.post("/files/upload", json={"path": str(tmp_path / "missing.bin")})
-    assert response.status_code == 400
-    assert "does not exist" in response.json()["detail"]
+    no_name = client.post("/files/upload", content=b"abc", headers={"content-type": "application/octet-stream"})
+    assert no_name.status_code == 422
 
-    response_dir = client.post("/files/upload", json={"path": str(tmp_path)})
-    assert response_dir.status_code == 400
+    no_payload = client.post("/files/upload", params={"file_name": "x.bin"})
+    assert no_payload.status_code == 422
 
 
 def test_unknown_node_returns_404(tmp_path: Path) -> None:
@@ -91,10 +97,13 @@ def test_repair_unknown_file_returns_400(tmp_path: Path) -> None:
 
 def test_audit_events_limit(tmp_path: Path) -> None:
     client = _client(tmp_path)
-    source = tmp_path / "sample.bin"
-    source.write_bytes(b"z" * 200)
-    file_id = client.post("/files/upload", json={"path": str(source)}).json()["file_id"]
-    client.post(f"/files/{file_id}/download", json={"destination": str(tmp_path / 'out.bin')})
+    file_id = client.post(
+        "/files/upload",
+        params={"file_name": "sample.bin"},
+        content=b"z" * 200,
+        headers={"content-type": "application/octet-stream"},
+    ).json()["file_id"]
+    client.get(f"/files/{file_id}/download")
 
     events = client.get("/audit/events", params={"limit": 1})
     assert events.status_code == 200
@@ -102,3 +111,25 @@ def test_audit_events_limit(tmp_path: Path) -> None:
 
     invalid = client.get("/audit/events", params={"limit": 0})
     assert invalid.status_code == 422
+
+
+def test_dedup_gc_endpoint(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    file_id = client.post(
+        "/files/upload",
+        params={"file_name": "gc.txt"},
+        content=b"gc-test-payload" * 200,
+        headers={"content-type": "application/octet-stream"},
+    ).json()["file_id"]
+    delete = client.delete(f"/files/{file_id}")
+    assert delete.status_code == 200
+
+    gc = client.post("/maintenance/dedup-gc", params={"force": "true"})
+    assert gc.status_code == 200
+    payload = gc.json()
+    assert set(payload.keys()) == {
+        "processed_chunks",
+        "deleted_chunks",
+        "deleted_symbols",
+        "failed_chunks",
+    }

@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from .chunking import split_bytes
+from .chunking import split_bytes_fastcdc
+from .compression import CompressionResult, compress_chunk, decompress_chunk
 from .config import FireCloudConfig
 from .crypto import (
     ENCRYPTION_OVERHEAD,
@@ -15,7 +17,7 @@ from .crypto import (
     encrypt_xchacha20poly1305,
 )
 from .fec import RaptorQCodec
-from .hashing import blake3_hex
+from .hashing import blake3_hex, chunk_hash
 from .metadata import AuditEvent, ChunkRecord, FileRecord, MetadataStore
 from .models import NodeDescriptor
 from .storage_client import StorageClient
@@ -155,45 +157,124 @@ class FireCloudController:
     def list_files(self) -> list[FileRecord]:
         return self.metadata.list_files()
 
-    def upload_file(self, file_path: Path) -> str:
-        if not file_path.exists() or not file_path.is_file():
-            raise ValueError(f"File does not exist: {file_path}")
+    def _chunking_bounds(self) -> tuple[int, int, int]:
+        max_plain_chunk_size = self.codec.payload_size - ENCRYPTION_OVERHEAD
+        if max_plain_chunk_size <= 0:
+            raise ValueError("Configured symbol size is too small to fit encrypted payloads")
+        configured = self.config.chunking
+        effective_max = min(configured.max_size, max_plain_chunk_size)
+        effective_avg = min(configured.avg_size, effective_max)
+        effective_min = min(configured.min_size, effective_avg)
+        if effective_min <= 0:
+            raise ValueError("Invalid effective chunking bounds")
+        return effective_min, effective_avg, effective_max
+
+    def _storage_chunk_id(self, chunk: ChunkRecord) -> str:
+        chunk_ref = self.metadata.get_chunk_hash(chunk.chunk_id)
+        return chunk_ref or chunk.chunk_id
+
+    def _aad_for_chunk(self, file_id: str, chunk: ChunkRecord) -> bytes:
+        chunk_ref = self.metadata.get_chunk_hash(chunk.chunk_id)
+        if chunk_ref is not None:
+            return chunk_ref.encode()
+        return file_id.encode()
+
+    def _upload_content(self, file_name: str, file_bytes: bytes) -> str:
+        if not file_name:
+            raise ValueError("file_name cannot be empty")
         online_nodes = self._online_node_ids()
         if len(online_nodes) < self.config.fec.total_symbols:
             raise RuntimeError(
                 "Not enough online nodes to satisfy total symbol requirement during upload"
             )
-        file_bytes = file_path.read_bytes()
         file_id = uuid4().hex
-        self.metadata.create_file(file_id=file_id, file_name=file_path.name, file_size=len(file_bytes))
+        self.metadata.create_file(file_id=file_id, file_name=file_name, file_size=len(file_bytes))
 
-        max_plain_chunk_size = self.codec.payload_size - ENCRYPTION_OVERHEAD
-        if max_plain_chunk_size <= 0:
-            raise ValueError("Configured symbol size is too small to fit encrypted payloads")
-        chunks = split_bytes(file_bytes, max_plain_chunk_size)
+        min_size, avg_size, max_size = self._chunking_bounds()
+        chunks = split_bytes_fastcdc(
+            file_bytes,
+            min_size=min_size,
+            avg_size=avg_size,
+            max_size=max_size,
+            normalization_level=self.config.chunking.normalization_level,
+        )
         for chunk_index, plain_chunk in enumerate(chunks):
+            logical_chunk_id = f"{file_id}:{chunk_index}"
+            hash_hex = chunk_hash(plain_chunk)
+            existing = self.metadata.get_dedup_chunk(hash_hex)
+            if existing is not None:
+                self.metadata.add_chunk(
+                    chunk_id=logical_chunk_id,
+                    file_id=file_id,
+                    chunk_index=chunk_index,
+                    plain_size=len(plain_chunk),
+                    compressed_size=existing.compressed_size,
+                    compression=existing.compression,
+                    encrypted_size=existing.encrypted_size,
+                )
+                self.metadata.add_chunk_dedup_ref(logical_chunk_id, hash_hex)
+                source_chunk_id = existing.canonical_chunk_id
+                source_symbols = self.metadata.list_symbols(source_chunk_id)
+                if source_chunk_id == logical_chunk_id or len(source_symbols) == 0:
+                    source_chunk_id = self.metadata.find_chunk_for_hash(
+                        chunk_hash=hash_hex,
+                        exclude_chunk_id=logical_chunk_id,
+                    )
+                if source_chunk_id is None:
+                    raise RuntimeError(f"Dedup index corruption for chunk hash {hash_hex}")
+                if source_chunk_id != existing.canonical_chunk_id:
+                    self.metadata.set_dedup_canonical_chunk(hash_hex, source_chunk_id)
+                self.metadata.copy_symbols(source_chunk_id=source_chunk_id, target_chunk_id=logical_chunk_id)
+                self.metadata.increment_dedup_ref_count(hash_hex)
+                continue
+
+            if self.config.compression.enabled:
+                compression_result = compress_chunk(
+                    file_name=file_name,
+                    data=plain_chunk,
+                    min_savings_ratio=self.config.compression.min_savings_ratio,
+                    sample_size=self.config.compression.sample_size,
+                )
+            else:
+                compression_result = CompressionResult(algorithm="none", payload=plain_chunk)
             encrypted_chunk = encrypt_xchacha20poly1305(
-                key=self.master_key, plaintext=plain_chunk, aad=file_id.encode()
+                key=self.master_key, plaintext=compression_result.payload, aad=hash_hex.encode()
             )
             encoded_chunk = self.codec.encode(encrypted_chunk)
-            chunk_id = f"{file_id}:{chunk_index}"
             self.metadata.add_chunk(
-                chunk_id=chunk_id,
+                chunk_id=logical_chunk_id,
                 file_id=file_id,
                 chunk_index=chunk_index,
                 plain_size=len(plain_chunk),
+                compressed_size=len(compression_result.payload),
+                compression=compression_result.algorithm,
                 encrypted_size=len(encrypted_chunk),
             )
+            self.metadata.create_dedup_chunk(
+                chunk_hash=hash_hex,
+                canonical_chunk_id=logical_chunk_id,
+                plain_size=len(plain_chunk),
+                compressed_size=len(compression_result.payload),
+                compression=compression_result.algorithm,
+                encrypted_size=len(encrypted_chunk),
+            )
+            self.metadata.add_chunk_dedup_ref(logical_chunk_id, hash_hex)
             for symbol_id, symbol_data in encoded_chunk.symbols.items():
                 target_node = online_nodes[(chunk_index + symbol_id) % len(online_nodes)]
                 relative_path = self.storage_client.put_symbol(
                     node_id=target_node,
-                    chunk_id=chunk_id,
+                    chunk_id=hash_hex,
                     symbol_id=symbol_id,
                     symbol_data=symbol_data,
                 )
                 self.metadata.add_symbol(
-                    chunk_id=chunk_id,
+                    chunk_id=logical_chunk_id,
+                    node_id=target_node,
+                    symbol_id=symbol_id,
+                    symbol_path=relative_path,
+                )
+                self.metadata.upsert_dedup_symbol(
+                    chunk_hash=hash_hex,
                     node_id=target_node,
                     symbol_id=symbol_id,
                     symbol_path=relative_path,
@@ -203,12 +284,20 @@ class FireCloudController:
             "file_uploaded",
             {
                 "file_id": file_id,
-                "file_name": file_path.name,
+                "file_name": file_name,
                 "file_size": len(file_bytes),
                 "chunk_count": len(chunks),
             },
         )
         return file_id
+
+    def upload_file(self, file_path: Path) -> str:
+        if not file_path.exists() or not file_path.is_file():
+            raise ValueError(f"File does not exist: {file_path}")
+        return self._upload_content(file_name=file_path.name, file_bytes=file_path.read_bytes())
+
+    def upload_bytes(self, file_name: str, file_bytes: bytes) -> str:
+        return self._upload_content(file_name=file_name, file_bytes=file_bytes)
 
     def _collect_chunk_symbols(self, chunk: ChunkRecord) -> dict[int, bytes]:
         node_state = {node.node_id: node.online for node in self.metadata.list_nodes()}
@@ -230,7 +319,7 @@ class FireCloudController:
                 continue
         return collected
 
-    def download_file(self, file_id: str, destination_path: Path) -> Path:
+    def _download_content(self, file_id: str) -> tuple[FileRecord, bytes]:
         file_record = self.metadata.get_file(file_id)
         if file_record is None:
             raise ValueError(f"Unknown file_id: {file_id}")
@@ -245,18 +334,69 @@ class FireCloudController:
                     f"need {self.config.fec.source_symbols}, found {len(collected)}"
                 )
             encrypted_chunk = self.codec.decode(collected, original_size=chunk.encrypted_size)
-            plain_chunk = decrypt_xchacha20poly1305(
-                key=self.master_key, payload=encrypted_chunk, aad=file_id.encode()
+            compressed_chunk = decrypt_xchacha20poly1305(
+                key=self.master_key,
+                payload=encrypted_chunk,
+                aad=self._aad_for_chunk(file_id=file_id, chunk=chunk),
             )
+            plain_chunk = decompress_chunk(chunk.compression, compressed_chunk)
             output.extend(plain_chunk[: chunk.plain_size])
+        return file_record, bytes(output)
 
+    def download_file(self, file_id: str, destination_path: Path) -> Path:
+        file_record, output = self._download_content(file_id)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
-        destination_path.write_bytes(bytes(output))
+        destination_path.write_bytes(output)
         self._append_audit_event(
             "file_downloaded",
-            {"file_id": file_id, "destination": str(destination_path), "size": len(output)},
+            {
+                "file_id": file_id,
+                "file_name": file_record.file_name,
+                "destination": str(destination_path),
+                "size": len(output),
+            },
         )
         return destination_path
+
+    def download_file_bytes(self, file_id: str) -> tuple[str, bytes]:
+        file_record, output = self._download_content(file_id)
+        self._append_audit_event(
+            "file_downloaded",
+            {"file_id": file_id, "file_name": file_record.file_name, "destination": "<bytes>", "size": len(output)},
+        )
+        return file_record.file_name, output
+
+    def delete_file(self, file_id: str) -> None:
+        file_record = self.metadata.get_file(file_id)
+        if file_record is None:
+            raise ValueError(f"Unknown file_id: {file_id}")
+
+        chunks = self.metadata.list_chunks(file_id)
+        for chunk in chunks:
+            chunk_hash_value = self.metadata.get_chunk_hash(chunk.chunk_id)
+            self.metadata.delete_symbols(chunk.chunk_id)
+            self.metadata.remove_chunk_dedup_ref(chunk.chunk_id)
+            self.metadata.delete_chunk(chunk.chunk_id)
+
+            if chunk_hash_value is None:
+                continue
+            record = self.metadata.decrement_dedup_ref_count(chunk_hash_value)
+            if record.ref_count == 0:
+                continue
+            if record.canonical_chunk_id != chunk.chunk_id:
+                continue
+            replacement = self.metadata.find_chunk_for_hash(
+                chunk_hash=chunk_hash_value,
+                exclude_chunk_id=chunk.chunk_id,
+            )
+            if replacement is not None:
+                self.metadata.set_dedup_canonical_chunk(chunk_hash_value, replacement)
+
+        self.metadata.delete_file(file_id)
+        self._append_audit_event(
+            "file_deleted",
+            {"file_id": file_id, "file_name": file_record.file_name, "chunk_count": len(chunks)},
+        )
 
     def repair_file(self, file_id: str) -> int:
         file_record = self.metadata.get_file(file_id)
@@ -269,6 +409,7 @@ class FireCloudController:
             )
         repaired_symbols = 0
         for chunk in self.metadata.list_chunks(file_id):
+            chunk_hash = self.metadata.get_chunk_hash(chunk.chunk_id)
             collected = self._collect_chunk_symbols(chunk)
             if len(collected) < self.config.fec.source_symbols:
                 raise RuntimeError(
@@ -280,13 +421,14 @@ class FireCloudController:
 
             encrypted_chunk = self.codec.decode(collected, original_size=chunk.encrypted_size)
             recoded = self.codec.encode(encrypted_chunk)
+            storage_chunk_id = self._storage_chunk_id(chunk)
             for symbol_id, symbol_data in recoded.symbols.items():
                 if symbol_id in existing_symbol_ids:
                     continue
                 target_node = online_nodes[(chunk.chunk_index + symbol_id) % len(online_nodes)]
                 relative_path = self.storage_client.put_symbol(
                     node_id=target_node,
-                    chunk_id=chunk.chunk_id,
+                    chunk_id=storage_chunk_id,
                     symbol_id=symbol_id,
                     symbol_data=symbol_data,
                 )
@@ -296,11 +438,60 @@ class FireCloudController:
                     symbol_id=symbol_id,
                     symbol_path=relative_path,
                 )
+                if chunk_hash is not None:
+                    self.metadata.upsert_dedup_symbol(
+                        chunk_hash=chunk_hash,
+                        node_id=target_node,
+                        symbol_id=symbol_id,
+                        symbol_path=relative_path,
+                    )
                 repaired_symbols += 1
         self._append_audit_event(
             "file_repaired", {"file_id": file_id, "repaired_symbols": repaired_symbols}
         )
         return repaired_symbols
+
+    def run_dedup_gc(self, force: bool = False, limit: int | None = None) -> dict[str, int]:
+        max_chunks = limit or self.config.dedup_gc.max_chunks_per_run
+        due_before = None
+        if not force:
+            due = datetime.now(tz=UTC) - timedelta(days=self.config.dedup_gc.grace_period_days)
+            due_before = due.isoformat()
+
+        candidates = self.metadata.list_gc_pending_dedup_chunks(due_before=due_before, limit=max_chunks)
+        deleted_chunks = 0
+        deleted_symbols = 0
+        failed_chunks = 0
+
+        for candidate in candidates:
+            symbols = self.metadata.list_dedup_symbols(candidate.chunk_hash)
+            chunk_failed = False
+            for symbol in symbols:
+                if not self.storage_client.has_node(symbol.node_id):
+                    chunk_failed = True
+                    break
+                try:
+                    self.storage_client.delete_symbol(symbol.node_id, symbol.symbol_path)
+                    deleted_symbols += 1
+                except (TransportError, ValueError):
+                    chunk_failed = True
+                    break
+            if chunk_failed:
+                failed_chunks += 1
+                continue
+            self.metadata.delete_dedup_symbols(candidate.chunk_hash)
+            self.metadata.cleanup_chunk_refs_for_hash(candidate.chunk_hash)
+            self.metadata.delete_dedup_chunk(candidate.chunk_hash)
+            deleted_chunks += 1
+
+        summary = {
+            "processed_chunks": len(candidates),
+            "deleted_chunks": deleted_chunks,
+            "deleted_symbols": deleted_symbols,
+            "failed_chunks": failed_chunks,
+        }
+        self._append_audit_event("dedup_gc_run", {"force": force, **summary})
+        return summary
 
     def audit_events(self, limit: int = 200) -> list[AuditEvent]:
         return self.metadata.list_audit_events(limit=limit)

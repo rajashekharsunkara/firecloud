@@ -15,6 +15,10 @@ def _controller(tmp_path: Path, symbol_size: int = 128, nodes: int = 5) -> FireC
     return FireCloudController(config=cfg)
 
 
+def _total_symbols(controller: FireCloudController) -> int:
+    return sum(node.symbol_count for node in controller.list_nodes())
+
+
 def test_upload_download_and_repair_flow(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
 
@@ -176,3 +180,105 @@ def test_add_and_remove_node(tmp_path: Path) -> None:
 
     controller.remove_node("node-extra")
     assert all(node.node_id != "node-extra" for node in controller.list_nodes())
+
+
+def test_dedup_skips_duplicate_symbol_storage_and_updates_refcount_on_delete(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    source = tmp_path / "same.bin"
+    source.write_bytes((b"same-data-" * 400) + b"tail")
+
+    file_a = controller.upload_file(source)
+    symbols_after_a = _total_symbols(controller)
+
+    file_b = controller.upload_file(source)
+    symbols_after_b = _total_symbols(controller)
+    assert symbols_after_b == symbols_after_a
+
+    dedup_entries = controller.metadata.list_dedup_chunks()
+    assert dedup_entries
+    assert all(entry.ref_count >= 2 for entry in dedup_entries)
+
+    controller.delete_file(file_a)
+    dedup_after_delete = controller.metadata.list_dedup_chunks()
+    assert dedup_after_delete
+    assert all(entry.ref_count >= 1 for entry in dedup_after_delete)
+
+    restored = tmp_path / "restored-dedup.bin"
+    controller.download_file(file_b, restored)
+    assert restored.read_bytes() == source.read_bytes()
+
+
+def test_delete_unknown_file_raises(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    with pytest.raises(ValueError):
+        controller.delete_file("missing-file")
+
+
+def test_fastcdc_boundary_shift_preserves_some_chunk_hashes(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    base = b"".join(
+        [(f"block-{index:04d}|".encode() + bytes([65 + (index % 26)]) * 96) for index in range(120)]
+    )
+    shifted = base[:500] + b"INSERTION" + base[500:]
+
+    a = tmp_path / "a.bin"
+    b = tmp_path / "b.bin"
+    a.write_bytes(base)
+    b.write_bytes(shifted)
+    file_a = controller.upload_file(a)
+    file_b = controller.upload_file(b)
+
+    hashes_a = {controller.metadata.get_chunk_hash(chunk.chunk_id) for chunk in controller.metadata.list_chunks(file_a)}
+    hashes_b = {controller.metadata.get_chunk_hash(chunk.chunk_id) for chunk in controller.metadata.list_chunks(file_b)}
+    shared = {item for item in hashes_a.intersection(hashes_b) if item is not None}
+    assert shared
+
+
+def test_controller_compression_roundtrip_and_metadata_flags(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    source = tmp_path / "compressible.txt"
+    source.write_text("firecloud-compression-line\n" * 5000)
+
+    file_id = controller.upload_file(source)
+    chunks = controller.metadata.list_chunks(file_id)
+    assert chunks
+    assert any(chunk.compression != "none" for chunk in chunks)
+
+    restored = tmp_path / "restored-compressible.txt"
+    controller.download_file(file_id, restored)
+    assert restored.read_text() == source.read_text()
+
+
+def test_dedup_gc_force_deletes_symbol_files_and_index_entries(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    source = tmp_path / "gc.bin"
+    source.write_bytes((b"gc-payload-" * 300) + b"end")
+
+    file_id = controller.upload_file(source)
+    chunks = controller.metadata.list_chunks(file_id)
+    assert chunks
+    chunk_hash = controller.metadata.get_chunk_hash(chunks[0].chunk_id)
+    assert chunk_hash is not None
+
+    dedup_symbols = controller.metadata.list_dedup_symbols(chunk_hash)
+    assert dedup_symbols
+    full_paths = [
+        controller.local_symbol_path(symbol.node_id, symbol.symbol_path) for symbol in dedup_symbols
+    ]
+    assert all(path is not None for path in full_paths)
+    assert all(path.exists() for path in full_paths if path is not None)
+
+    controller.delete_file(file_id)
+    dedup_record = controller.metadata.get_dedup_chunk(chunk_hash)
+    assert dedup_record is not None
+    assert dedup_record.gc_pending
+    assert dedup_record.ref_count == 0
+
+    normal_run = controller.run_dedup_gc(force=False)
+    assert normal_run["deleted_chunks"] == 0
+
+    forced = controller.run_dedup_gc(force=True)
+    assert forced["deleted_chunks"] >= 1
+    assert controller.metadata.get_dedup_chunk(chunk_hash) is None
+    assert controller.metadata.list_dedup_symbols(chunk_hash) == []
+    assert all(not path.exists() for path in full_paths if path is not None)

@@ -1,19 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from .controller import FireCloudController
-
-
-class UploadRequest(BaseModel):
-    path: str = Field(..., description="Absolute or relative path to source file")
-
-
-class DownloadRequest(BaseModel):
-    destination: str = Field(..., description="Destination path for restored file")
 
 
 class AddNodeRequest(BaseModel):
@@ -42,22 +32,39 @@ def create_api(controller: FireCloudController) -> FastAPI:
         ]
 
     @app.post("/files/upload")
-    def upload_file(payload: UploadRequest) -> dict[str, str]:
-        file_path = Path(payload.path)
+    def upload_file(
+        file_name: str = Query(..., min_length=1),
+        payload: bytes = Body(..., media_type="application/octet-stream"),
+    ) -> dict[str, str]:
         try:
-            file_id = controller.upload_file(file_path)
+            file_id = controller.upload_bytes(file_name=file_name, file_bytes=payload)
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"file_id": file_id}
 
-    @app.post("/files/{file_id}/download")
-    def download_file(file_id: str, payload: DownloadRequest) -> dict[str, str]:
-        destination = Path(payload.destination)
+    @app.get("/files/{file_id}/download")
+    def download_file(file_id: str) -> Response:
         try:
-            output_path = controller.download_file(file_id=file_id, destination_path=destination)
+            file_name, content = controller.download_file_bytes(file_id=file_id)
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"destination": str(output_path)}
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+        )
+
+    @app.delete("/files/{file_id}")
+    def delete_file(file_id: str) -> dict[str, str]:
+        try:
+            controller.delete_file(file_id=file_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"file_id": file_id}
+
+    @app.post("/maintenance/dedup-gc")
+    def run_dedup_gc(force: bool = Query(default=False)) -> dict[str, int]:
+        return controller.run_dedup_gc(force=force)
 
     @app.get("/nodes")
     def list_nodes() -> list[dict[str, object]]:

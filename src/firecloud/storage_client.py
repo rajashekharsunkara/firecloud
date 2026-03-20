@@ -67,6 +67,11 @@ class StorageClient:
         transport = self._transport_for(node)
         return transport.has_symbol(node_id=node.node_id, endpoint=node.endpoint, symbol_path=symbol_path)
 
+    def delete_symbol(self, node_id: str, symbol_path: str) -> None:
+        node = self.node_descriptor(node_id)
+        transport = self._transport_for(node)
+        transport.delete_symbol(node_id=node.node_id, endpoint=node.endpoint, symbol_path=symbol_path)
+
     def symbol_count(self, node_id: str) -> int:
         node = self.node_descriptor(node_id)
         transport = self._transport_for(node)
@@ -77,4 +82,3 @@ class StorageClient:
         if node is None or node.kind != "local":
             return None
         return Path(node.endpoint) / symbol_path
-

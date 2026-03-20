@@ -22,6 +22,8 @@ class NodeTransport(Protocol):
 
     def has_symbol(self, node_id: str, endpoint: str, symbol_path: str) -> bool: ...
 
+    def delete_symbol(self, node_id: str, endpoint: str, symbol_path: str) -> None: ...
+
     def symbol_count(self, node_id: str, endpoint: str) -> int: ...
 
 
@@ -49,6 +51,9 @@ class LocalNodeTransport:
 
     def has_symbol(self, node_id: str, endpoint: str, symbol_path: str) -> bool:
         return self._store(node_id=node_id, endpoint=endpoint).has_symbol(symbol_path)
+
+    def delete_symbol(self, node_id: str, endpoint: str, symbol_path: str) -> None:
+        self._store(node_id=node_id, endpoint=endpoint).delete_symbol(symbol_path)
 
     def symbol_count(self, node_id: str, endpoint: str) -> int:
         return self._store(node_id=node_id, endpoint=endpoint).symbol_count()
@@ -112,6 +117,19 @@ class HttpNodeTransport:
             f"HTTP has_symbol failed for {node_id}: {response.status_code} {response.text}"
         )
 
+    def delete_symbol(self, node_id: str, endpoint: str, symbol_path: str) -> None:
+        url = f"{endpoint.rstrip('/')}/symbols"
+        try:
+            with self._client() as client:
+                response = client.delete(url, params={"path": symbol_path})
+        except httpx.HTTPError as exc:
+            raise TransportError(f"HTTP delete_symbol failed for {node_id}: {exc}") from exc
+        if response.status_code in {200, 204, 404}:
+            return
+        raise TransportError(
+            f"HTTP delete_symbol failed for {node_id}: {response.status_code} {response.text}"
+        )
+
     def symbol_count(self, node_id: str, endpoint: str) -> int:
         url = f"{endpoint.rstrip('/')}/stats"
         try:
@@ -128,4 +146,3 @@ class HttpNodeTransport:
         if not isinstance(count, int):
             raise TransportError(f"Invalid stats response for {node_id}")
         return count
-

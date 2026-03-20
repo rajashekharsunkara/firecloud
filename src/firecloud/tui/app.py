@@ -26,7 +26,7 @@ class FireCloudTUI(App[None]):
             yield DataTable(id="nodes-table")
         yield Static(
             "Commands: upload <path> | download <file_id> <path> | "
-            "offline <node_id> | online <node_id> | repair <file_id> | verify",
+            "delete <file_id> | offline <node_id> | online <node_id> | repair <file_id> | verify",
             id="help",
         )
         yield Input(placeholder="Enter command...", id="command")
@@ -73,6 +73,9 @@ class FireCloudTUI(App[None]):
             elif action == "download" and len(parts) == 3:
                 out = self.controller.download_file(parts[1], Path(parts[2]))
                 self._set_status(f"Downloaded to {out}")
+            elif action == "delete" and len(parts) == 2:
+                self.controller.delete_file(parts[1])
+                self._set_status(f"Deleted {parts[1]}")
             elif action == "offline" and len(parts) == 2:
                 self.controller.set_node_online(parts[1], False)
                 self._set_status(f"{parts[1]} set offline")

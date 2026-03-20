@@ -30,6 +30,12 @@ def _build_parser() -> argparse.ArgumentParser:
     download.add_argument("file_id", help="File id")
     download.add_argument("destination", help="Destination path")
 
+    delete = sub.add_parser("delete", help="Delete a file by id")
+    delete.add_argument("file_id", help="File id")
+
+    gc = sub.add_parser("gc-dedup", help="Run dedup garbage collection")
+    gc.add_argument("--force", action="store_true", help="Ignore grace period and delete pending chunks now")
+
     set_node = sub.add_parser("node", help="Set node status")
     set_node.add_argument("node_id")
     set_node.add_argument("status", choices=["online", "offline"])
@@ -91,6 +97,14 @@ def main() -> None:
     if args.command == "download":
         output = controller.download_file(file_id=args.file_id, destination_path=Path(args.destination))
         print(output)
+        return
+    if args.command == "delete":
+        controller.delete_file(args.file_id)
+        print(f"deleted {args.file_id}")
+        return
+    if args.command == "gc-dedup":
+        summary = controller.run_dedup_gc(force=args.force)
+        print(summary)
         return
     if args.command == "node":
         controller.set_node_online(args.node_id, args.status == "online")

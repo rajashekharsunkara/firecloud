@@ -6,6 +6,53 @@ from typing import Literal
 
 
 @dataclass(frozen=True)
+class ChunkingConfig:
+    min_size: int = 64 * 1024
+    avg_size: int = 1024 * 1024
+    max_size: int = 4 * 1024 * 1024
+    normalization_level: int = 2
+
+    def __post_init__(self) -> None:
+        if self.min_size <= 0:
+            raise ValueError("min_size must be > 0")
+        if self.avg_size <= 0:
+            raise ValueError("avg_size must be > 0")
+        if self.max_size <= 0:
+            raise ValueError("max_size must be > 0")
+        if self.min_size > self.avg_size:
+            raise ValueError("min_size must be <= avg_size")
+        if self.avg_size > self.max_size:
+            raise ValueError("avg_size must be <= max_size")
+        if self.normalization_level < 0 or self.normalization_level > 3:
+            raise ValueError("normalization_level must be between 0 and 3")
+
+
+@dataclass(frozen=True)
+class CompressionConfig:
+    enabled: bool = True
+    min_savings_ratio: float = 0.10
+    sample_size: int = 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if self.min_savings_ratio < 0 or self.min_savings_ratio >= 1:
+            raise ValueError("min_savings_ratio must be in [0, 1)")
+        if self.sample_size <= 0:
+            raise ValueError("sample_size must be > 0")
+
+
+@dataclass(frozen=True)
+class DedupGCConfig:
+    grace_period_days: int = 30
+    max_chunks_per_run: int = 1000
+
+    def __post_init__(self) -> None:
+        if self.grace_period_days < 0:
+            raise ValueError("grace_period_days must be >= 0")
+        if self.max_chunks_per_run <= 0:
+            raise ValueError("max_chunks_per_run must be > 0")
+
+
+@dataclass(frozen=True)
 class FECConfig:
     source_symbols: int = 3
     total_symbols: int = 5
@@ -45,6 +92,9 @@ class FireCloudConfig:
     node_count: int = 5
     nodes: tuple[NodeConfig, ...] | None = None
     fec: FECConfig = field(default_factory=FECConfig)
+    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
+    compression: CompressionConfig = field(default_factory=CompressionConfig)
+    dedup_gc: DedupGCConfig = field(default_factory=DedupGCConfig)
     db_filename: str = "metadata.db"
     master_key_filename: str = "master.key"
 

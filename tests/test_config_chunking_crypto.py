@@ -2,8 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from firecloud.chunking import iter_file_chunks, split_bytes
-from firecloud.config import FECConfig, FireCloudConfig, NodeConfig
+from firecloud.chunking import iter_file_chunks, split_bytes, split_bytes_fastcdc
+from firecloud.config import (
+    ChunkingConfig,
+    CompressionConfig,
+    DedupGCConfig,
+    FECConfig,
+    FireCloudConfig,
+    NodeConfig,
+)
 from firecloud.crypto import (
     ENCRYPTION_OVERHEAD,
     KEY_SIZE,
@@ -55,6 +62,46 @@ def test_split_bytes_and_iter_chunks(tmp_path: Path) -> None:
     assert list(iter_file_chunks(str(file_path), 3)) == [b"abc", b"def", b"g"]
     with pytest.raises(ValueError):
         list(iter_file_chunks(str(file_path), -1))
+
+
+def test_fastcdc_chunking_validation_and_boundaries() -> None:
+    with pytest.raises(ValueError):
+        split_bytes_fastcdc(b"abc", min_size=0, avg_size=4, max_size=8)
+    with pytest.raises(ValueError):
+        split_bytes_fastcdc(b"abc", min_size=8, avg_size=4, max_size=16)
+    with pytest.raises(ValueError):
+        split_bytes_fastcdc(b"abc", min_size=4, avg_size=8, max_size=6)
+
+    data = (b"abc123" * 300) + (b"ZZZZ" * 300) + (b"abc123" * 300)
+    chunks = split_bytes_fastcdc(
+        data,
+        min_size=64,
+        avg_size=128,
+        max_size=256,
+        normalization_level=2,
+    )
+    assert b"".join(chunks) == data
+    assert all(1 <= len(chunk) <= 256 for chunk in chunks)
+    if len(chunks) > 1:
+        assert all(len(chunk) >= 64 for chunk in chunks[:-1])
+
+
+def test_chunking_and_compression_config_validation() -> None:
+    with pytest.raises(ValueError):
+        ChunkingConfig(min_size=0, avg_size=1024, max_size=2048)
+    with pytest.raises(ValueError):
+        ChunkingConfig(min_size=2048, avg_size=1024, max_size=4096)
+    with pytest.raises(ValueError):
+        ChunkingConfig(min_size=1024, avg_size=2048, max_size=4096, normalization_level=10)
+
+    with pytest.raises(ValueError):
+        CompressionConfig(min_savings_ratio=1.0)
+    with pytest.raises(ValueError):
+        CompressionConfig(sample_size=0)
+    with pytest.raises(ValueError):
+        DedupGCConfig(grace_period_days=-1)
+    with pytest.raises(ValueError):
+        DedupGCConfig(max_chunks_per_run=0)
 
 
 def test_crypto_roundtrip_and_lengths() -> None:

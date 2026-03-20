@@ -18,6 +18,7 @@ dependencies = [
   "libraptorq>=0.1.9",
   "pydantic>=2.11.9",
   "httpx>=0.28.0",
+  "zstandard>=0.23.0",
 ]
 
 [project.optional-dependencies]
