@@ -7,7 +7,25 @@ from fastapi import Body, FastAPI, HTTPException, Query, Response
 from .storage import NodeStore
 
 
-def create_storage_api(node_id: str, root_dir: Path) -> FastAPI:
+def _dir_size_bytes(root: Path) -> int:
+    total = 0
+    for path in root.rglob("*"):
+        if path.is_file():
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def create_storage_api(
+    node_id: str,
+    root_dir: Path,
+    *,
+    total_bytes: int | None = None,
+    reserved_bytes: int = 0,
+    min_free_bytes: int = 0,
+) -> FastAPI:
     store = NodeStore(node_id=node_id, root_dir=root_dir)
     app = FastAPI(title=f"FireCloud Storage Node ({node_id})", version="0.1.0")
 
@@ -59,6 +77,18 @@ def create_storage_api(node_id: str, root_dir: Path) -> FastAPI:
 
     @app.get("/stats")
     def stats() -> dict[str, int]:
-        return {"symbol_count": store.symbol_count()}
+        used_bytes = _dir_size_bytes(store.symbols_dir)
+        if total_bytes is None:
+            available_bytes = 0
+            total_value = 0
+        else:
+            available_bytes = max(0, int(total_bytes) - used_bytes - reserved_bytes - min_free_bytes)
+            total_value = int(total_bytes)
+        return {
+            "symbol_count": store.symbol_count(),
+            "used_bytes": used_bytes,
+            "total_bytes": total_value,
+            "available_bytes": available_bytes,
+        }
 
     return app

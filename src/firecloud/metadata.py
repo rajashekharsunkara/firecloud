@@ -35,6 +35,7 @@ class SymbolRecord:
     node_id: str
     symbol_id: int
     symbol_path: str
+    symbol_hash: str
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class DedupSymbolRecord:
     node_id: str
     symbol_id: int
     symbol_path: str
+    symbol_hash: str
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,7 @@ class MetadataStore:
                     node_id TEXT NOT NULL,
                     symbol_id INTEGER NOT NULL,
                     symbol_path TEXT NOT NULL,
+                    symbol_hash TEXT NOT NULL DEFAULT '',
                     UNIQUE(chunk_id, node_id, symbol_id),
                     FOREIGN KEY(chunk_id) REFERENCES chunks(chunk_id)
                 )
@@ -190,6 +193,7 @@ class MetadataStore:
                     node_id TEXT NOT NULL,
                     symbol_id INTEGER NOT NULL,
                     symbol_path TEXT NOT NULL,
+                    symbol_hash TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(chunk_hash, node_id, symbol_id),
                     FOREIGN KEY(chunk_hash) REFERENCES dedup_chunks(chunk_hash) ON DELETE CASCADE
                 )
@@ -199,6 +203,8 @@ class MetadataStore:
             self._ensure_column("nodes", "kind", "TEXT NOT NULL DEFAULT 'local'")
             self._ensure_column("chunks", "compressed_size", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("chunks", "compression", "TEXT NOT NULL DEFAULT 'none'")
+            self._ensure_column("symbols", "symbol_hash", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("dedup_symbols", "symbol_hash", "TEXT NOT NULL DEFAULT ''")
 
     def _ensure_column(self, table_name: str, column_name: str, definition_sql: str) -> None:
         rows = self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -285,23 +291,30 @@ class MetadataStore:
             ).fetchall()
         return [ChunkRecord(**dict(row)) for row in rows]
 
-    def add_symbol(self, chunk_id: str, node_id: str, symbol_id: int, symbol_path: str) -> None:
+    def add_symbol(
+        self,
+        chunk_id: str,
+        node_id: str,
+        symbol_id: int,
+        symbol_path: str,
+        symbol_hash: str = "",
+    ) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO symbols(chunk_id, node_id, symbol_id, symbol_path)
-                VALUES(?, ?, ?, ?)
+                INSERT INTO symbols(chunk_id, node_id, symbol_id, symbol_path, symbol_hash)
+                VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(chunk_id, node_id, symbol_id)
-                DO UPDATE SET symbol_path=excluded.symbol_path
+                DO UPDATE SET symbol_path=excluded.symbol_path, symbol_hash=excluded.symbol_hash
                 """,
-                (chunk_id, node_id, symbol_id, symbol_path),
+                (chunk_id, node_id, symbol_id, symbol_path, symbol_hash),
             )
 
     def list_symbols(self, chunk_id: str) -> list[SymbolRecord]:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT id AS record_id, chunk_id, node_id, symbol_id, symbol_path
+                SELECT id AS record_id, chunk_id, node_id, symbol_id, symbol_path, symbol_hash
                 FROM symbols WHERE chunk_id = ?
                 ORDER BY symbol_id ASC, node_id ASC
                 """,
@@ -327,7 +340,7 @@ class MetadataStore:
         with self._lock, self._conn:
             rows = self._conn.execute(
                 """
-                SELECT node_id, symbol_id, symbol_path
+                SELECT node_id, symbol_id, symbol_path, symbol_hash
                 FROM symbols
                 WHERE chunk_id = ?
                 ORDER BY symbol_id ASC, node_id ASC
@@ -337,12 +350,18 @@ class MetadataStore:
             for row in rows:
                 self._conn.execute(
                     """
-                    INSERT INTO symbols(chunk_id, node_id, symbol_id, symbol_path)
-                    VALUES(?, ?, ?, ?)
+                    INSERT INTO symbols(chunk_id, node_id, symbol_id, symbol_path, symbol_hash)
+                    VALUES(?, ?, ?, ?, ?)
                     ON CONFLICT(chunk_id, node_id, symbol_id)
-                    DO UPDATE SET symbol_path=excluded.symbol_path
+                    DO UPDATE SET symbol_path=excluded.symbol_path, symbol_hash=excluded.symbol_hash
                     """,
-                    (target_chunk_id, row["node_id"], row["symbol_id"], row["symbol_path"]),
+                    (
+                        target_chunk_id,
+                        row["node_id"],
+                        row["symbol_id"],
+                        row["symbol_path"],
+                        row["symbol_hash"],
+                    ),
                 )
 
     def upsert_dedup_symbol(
@@ -351,23 +370,24 @@ class MetadataStore:
         node_id: str,
         symbol_id: int,
         symbol_path: str,
+        symbol_hash: str = "",
     ) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO dedup_symbols(chunk_hash, node_id, symbol_id, symbol_path)
-                VALUES(?, ?, ?, ?)
+                INSERT INTO dedup_symbols(chunk_hash, node_id, symbol_id, symbol_path, symbol_hash)
+                VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(chunk_hash, node_id, symbol_id)
-                DO UPDATE SET symbol_path=excluded.symbol_path
+                DO UPDATE SET symbol_path=excluded.symbol_path, symbol_hash=excluded.symbol_hash
                 """,
-                (chunk_hash, node_id, symbol_id, symbol_path),
+                (chunk_hash, node_id, symbol_id, symbol_path, symbol_hash),
             )
 
     def list_dedup_symbols(self, chunk_hash: str) -> list[DedupSymbolRecord]:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT chunk_hash, node_id, symbol_id, symbol_path
+                SELECT chunk_hash, node_id, symbol_id, symbol_path, symbol_hash
                 FROM dedup_symbols
                 WHERE chunk_hash = ?
                 ORDER BY symbol_id ASC, node_id ASC
@@ -375,6 +395,148 @@ class MetadataStore:
                 (chunk_hash,),
             ).fetchall()
         return [DedupSymbolRecord(**dict(row)) for row in rows]
+
+    def commit_upload(
+        self,
+        *,
+        file_id: str,
+        file_name: str,
+        file_size: int,
+        chunks: list[dict[str, Any]],
+        chunk_refs: list[tuple[str, str]],
+        copied_symbol_chunks: list[tuple[str, str]],
+        symbols: list[tuple[str, str, int, str, str]],
+        dedup_chunks: list[dict[str, Any]],
+        dedup_symbols: list[tuple[str, str, int, str, str]],
+        dedup_increment_counts: dict[str, int],
+        canonical_updates: dict[str, str],
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO files(file_id, file_name, file_size, created_at) VALUES(?, ?, ?, ?)",
+                (file_id, file_name, file_size, self._utc_now()),
+            )
+            for chunk in chunks:
+                self._conn.execute(
+                    """
+                    INSERT INTO chunks(
+                        chunk_id, file_id, chunk_index, plain_size, compressed_size, compression, encrypted_size
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk["chunk_id"],
+                        chunk["file_id"],
+                        chunk["chunk_index"],
+                        chunk["plain_size"],
+                        chunk["compressed_size"],
+                        chunk["compression"],
+                        chunk["encrypted_size"],
+                    ),
+                )
+            for dedup in dedup_chunks:
+                self._conn.execute(
+                    """
+                    INSERT INTO dedup_chunks(
+                        chunk_hash,
+                        canonical_chunk_id,
+                        plain_size,
+                        compressed_size,
+                        compression,
+                        encrypted_size,
+                        ref_count,
+                        gc_pending,
+                        gc_marked_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, 0, NULL)
+                    """,
+                    (
+                        dedup["chunk_hash"],
+                        dedup["canonical_chunk_id"],
+                        dedup["plain_size"],
+                        dedup["compressed_size"],
+                        dedup["compression"],
+                        dedup["encrypted_size"],
+                        dedup["ref_count"],
+                    ),
+                )
+            for chunk_id, chunk_hash in chunk_refs:
+                self._conn.execute(
+                    """
+                    INSERT INTO chunk_dedup_refs(chunk_id, chunk_hash)
+                    VALUES(?, ?)
+                    ON CONFLICT(chunk_id) DO UPDATE SET chunk_hash=excluded.chunk_hash
+                    """,
+                    (chunk_id, chunk_hash),
+                )
+            for source_chunk_id, target_chunk_id in copied_symbol_chunks:
+                rows = self._conn.execute(
+                    """
+                    SELECT node_id, symbol_id, symbol_path, symbol_hash
+                    FROM symbols
+                    WHERE chunk_id = ?
+                    ORDER BY symbol_id ASC, node_id ASC
+                    """,
+                    (source_chunk_id,),
+                ).fetchall()
+                for row in rows:
+                    self._conn.execute(
+                        """
+                        INSERT INTO symbols(chunk_id, node_id, symbol_id, symbol_path, symbol_hash)
+                        VALUES(?, ?, ?, ?, ?)
+                        ON CONFLICT(chunk_id, node_id, symbol_id)
+                        DO UPDATE SET symbol_path=excluded.symbol_path, symbol_hash=excluded.symbol_hash
+                        """,
+                        (
+                            target_chunk_id,
+                            row["node_id"],
+                            row["symbol_id"],
+                            row["symbol_path"],
+                            row["symbol_hash"],
+                        ),
+                    )
+            for chunk_id, node_id, symbol_id, symbol_path, symbol_hash in symbols:
+                self._conn.execute(
+                    """
+                    INSERT INTO symbols(chunk_id, node_id, symbol_id, symbol_path, symbol_hash)
+                    VALUES(?, ?, ?, ?, ?)
+                    ON CONFLICT(chunk_id, node_id, symbol_id)
+                    DO UPDATE SET symbol_path=excluded.symbol_path, symbol_hash=excluded.symbol_hash
+                    """,
+                    (chunk_id, node_id, symbol_id, symbol_path, symbol_hash),
+                )
+            for chunk_hash, node_id, symbol_id, symbol_path, symbol_hash in dedup_symbols:
+                self._conn.execute(
+                    """
+                    INSERT INTO dedup_symbols(chunk_hash, node_id, symbol_id, symbol_path, symbol_hash)
+                    VALUES(?, ?, ?, ?, ?)
+                    ON CONFLICT(chunk_hash, node_id, symbol_id)
+                    DO UPDATE SET symbol_path=excluded.symbol_path, symbol_hash=excluded.symbol_hash
+                    """,
+                    (chunk_hash, node_id, symbol_id, symbol_path, symbol_hash),
+                )
+            for chunk_hash, increment in dedup_increment_counts.items():
+                cursor = self._conn.execute(
+                    """
+                    UPDATE dedup_chunks
+                    SET ref_count = ref_count + ?, gc_pending = 0, gc_marked_at = NULL
+                    WHERE chunk_hash = ?
+                    """,
+                    (increment, chunk_hash),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(f"Unknown chunk_hash: {chunk_hash}")
+            for chunk_hash, canonical_chunk_id in canonical_updates.items():
+                cursor = self._conn.execute(
+                    """
+                    UPDATE dedup_chunks
+                    SET canonical_chunk_id = ?
+                    WHERE chunk_hash = ?
+                    """,
+                    (canonical_chunk_id, chunk_hash),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(f"Unknown chunk_hash: {chunk_hash}")
 
     def delete_dedup_symbols(self, chunk_hash: str) -> None:
         with self._lock, self._conn:

@@ -175,7 +175,7 @@ def test_add_and_remove_node(tmp_path: Path) -> None:
     extra_node_path = tmp_path / "extra-node"
     extra_node_path.mkdir(parents=True, exist_ok=True)
 
-    controller.add_node("node-extra", str(extra_node_path), kind="local")
+    controller.add_node("node-extra", "http://127.0.0.1:9999", kind="http")
     assert any(node.node_id == "node-extra" for node in controller.list_nodes())
 
     controller.remove_node("node-extra")

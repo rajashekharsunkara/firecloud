@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,8 @@ class FireCloudConfig:
     root_dir: Path = Path(".firecloud")
     node_count: int = 5
     nodes: tuple[NodeConfig, ...] | None = None
+    bootstrap_peers: tuple[str, ...] = ()
+    decentralized_mode: bool = False
     fec: FECConfig = field(default_factory=FECConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
@@ -99,6 +102,22 @@ class FireCloudConfig:
     master_key_filename: str = "master.key"
 
     def __post_init__(self) -> None:
+        normalized_bootstrap_peers: list[str] = []
+        for endpoint in self.bootstrap_peers:
+            normalized = endpoint.strip().rstrip("/")
+            if not normalized:
+                raise ValueError("bootstrap_peers cannot contain empty endpoints")
+            parsed = urlparse(normalized)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(
+                    "bootstrap_peers must be absolute HTTP(S) endpoints (for example "
+                    "'http://127.0.0.1:8080')"
+                )
+            normalized_bootstrap_peers.append(normalized)
+        if len(normalized_bootstrap_peers) != len(set(normalized_bootstrap_peers)):
+            raise ValueError("bootstrap_peers cannot contain duplicates")
+        self.bootstrap_peers = tuple(normalized_bootstrap_peers)
+
         if self.nodes is not None:
             if len(self.nodes) == 0:
                 raise ValueError("nodes cannot be empty")
@@ -106,11 +125,23 @@ class FireCloudConfig:
             if len(node_ids) != len(set(node_ids)):
                 raise ValueError("Duplicate node_id values are not allowed")
             effective_node_count = len(self.nodes)
+            if self.decentralized_mode:
+                non_http_nodes = [node.node_id for node in self.nodes if node.kind != "http"]
+                if non_http_nodes:
+                    joined = ", ".join(non_http_nodes)
+                    raise ValueError(
+                        "decentralized_mode requires all configured nodes to be http; "
+                        f"non-http nodes: {joined}"
+                    )
+        elif self.decentralized_mode:
+            # In decentralized mode, peers are discovered or added at runtime.
+            # We intentionally start with no simulated local nodes.
+            effective_node_count = 0
         else:
             effective_node_count = self.node_count
             if self.node_count <= 0:
                 raise ValueError("node_count must be > 0")
-        if effective_node_count < self.fec.total_symbols:
+        if not self.decentralized_mode and effective_node_count < self.fec.total_symbols:
             raise ValueError("node_count must be >= total_symbols")
 
     @property
@@ -131,6 +162,8 @@ class FireCloudConfig:
     def node_definitions(self) -> list[NodeConfig]:
         if self.nodes is not None:
             return list(self.nodes)
+        if self.decentralized_mode:
+            return []
         return [
             NodeConfig(node_id=f"node-{idx}", endpoint=str(self.node_data_dir(f"node-{idx}")), kind="local")
             for idx in range(1, self.node_count + 1)

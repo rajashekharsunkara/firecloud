@@ -4,3 +4,31 @@ __pycache__/
 .firecloud/
 *.pyc
 *.egg-info/
+
+# Runtime data (generated during tests/operation)
+.firecloud-runtime/
+
+# Desktop build artifacts
+desktop/.svelte-kit/
+desktop/build/
+desktop/node_modules/
+desktop/src-tauri/target/
+
+# Mobile build artifacts
+mobile/.dart_tool/
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db

@@ -12,7 +12,7 @@ from firecloud.controller import FireCloudController
 
 class FireCloudTUI(App[None]):
     TITLE = "FireCloud Python MVP"
-    SUB_TITLE = "Local cluster simulation"
+    SUB_TITLE = "Decentralized storage network"
     BINDINGS = [Binding("r", "refresh", "Refresh"), Binding("q", "quit", "Quit")]
 
     def __init__(self, controller: FireCloudController) -> None:

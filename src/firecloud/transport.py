@@ -26,6 +26,8 @@ class NodeTransport(Protocol):
 
     def symbol_count(self, node_id: str, endpoint: str) -> int: ...
 
+    def storage_stats(self, node_id: str, endpoint: str) -> dict[str, int]: ...
+
 
 class LocalNodeTransport:
     def __init__(self) -> None:
@@ -57,6 +59,22 @@ class LocalNodeTransport:
 
     def symbol_count(self, node_id: str, endpoint: str) -> int:
         return self._store(node_id=node_id, endpoint=endpoint).symbol_count()
+
+    def storage_stats(self, node_id: str, endpoint: str) -> dict[str, int]:
+        store = self._store(node_id=node_id, endpoint=endpoint)
+        symbols_dir = store.symbols_dir
+        used = 0
+        for path in symbols_dir.rglob("*.bin"):
+            try:
+                used += path.stat().st_size
+            except OSError:
+                continue
+        return {
+            "symbol_count": store.symbol_count(),
+            "available_bytes": 0,
+            "used_bytes": used,
+            "total_bytes": 0,
+        }
 
 
 class HttpNodeTransport:
@@ -146,3 +164,35 @@ class HttpNodeTransport:
         if not isinstance(count, int):
             raise TransportError(f"Invalid stats response for {node_id}")
         return count
+
+    def storage_stats(self, node_id: str, endpoint: str) -> dict[str, int]:
+        url = f"{endpoint.rstrip('/')}/stats"
+        try:
+            with self._client() as client:
+                response = client.get(url)
+        except httpx.HTTPError as exc:
+            raise TransportError(f"HTTP storage_stats failed for {node_id}: {exc}") from exc
+        if response.status_code != 200:
+            raise TransportError(
+                f"HTTP storage_stats failed for {node_id}: {response.status_code} {response.text}"
+            )
+        payload = response.json()
+        count = payload.get("symbol_count")
+        if not isinstance(count, int):
+            raise TransportError(f"Invalid stats response for {node_id}")
+
+        available = payload.get("available_bytes")
+        used = payload.get("used_bytes")
+        total = payload.get("total_bytes")
+        if not isinstance(available, int):
+            available = 0
+        if not isinstance(used, int):
+            used = 0
+        if not isinstance(total, int):
+            total = 0
+        return {
+            "symbol_count": count,
+            "available_bytes": max(0, available),
+            "used_bytes": max(0, used),
+            "total_bytes": max(0, total),
+        }

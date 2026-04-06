@@ -49,6 +49,41 @@ def test_firecloud_config_validation() -> None:
             fec=FECConfig(source_symbols=3, total_symbols=5, symbol_size=128),
         )
 
+    cfg = FireCloudConfig(
+        decentralized_mode=True,
+        fec=FECConfig(source_symbols=3, total_symbols=5, symbol_size=128),
+    )
+    assert cfg.node_definitions() == []
+
+    with pytest.raises(ValueError):
+        FireCloudConfig(
+            decentralized_mode=True,
+            nodes=(
+                NodeConfig(node_id="node-a", endpoint="http://127.0.0.1:8091", kind="http"),
+                NodeConfig(node_id="node-b", endpoint="/tmp/b", kind="local"),
+                NodeConfig(node_id="node-c", endpoint="http://127.0.0.1:8093", kind="http"),
+                NodeConfig(node_id="node-d", endpoint="http://127.0.0.1:8094", kind="http"),
+                NodeConfig(node_id="node-e", endpoint="http://127.0.0.1:8095", kind="http"),
+            ),
+            fec=FECConfig(source_symbols=3, total_symbols=5, symbol_size=128),
+        )
+
+    cfg_with_bootstrap = FireCloudConfig(
+        decentralized_mode=True,
+        bootstrap_peers=(" http://127.0.0.1:8080/ ",),
+        fec=FECConfig(source_symbols=3, total_symbols=5, symbol_size=128),
+    )
+    assert cfg_with_bootstrap.bootstrap_peers == ("http://127.0.0.1:8080",)
+
+    with pytest.raises(ValueError):
+        FireCloudConfig(bootstrap_peers=("",))
+    with pytest.raises(ValueError):
+        FireCloudConfig(bootstrap_peers=("ftp://127.0.0.1:8080",))
+    with pytest.raises(ValueError):
+        FireCloudConfig(
+            bootstrap_peers=("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+        )
+
 
 def test_split_bytes_and_iter_chunks(tmp_path: Path) -> None:
     data = b"abcdefg"

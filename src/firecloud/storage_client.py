@@ -77,6 +77,13 @@ class StorageClient:
         transport = self._transport_for(node)
         return transport.symbol_count(node_id=node.node_id, endpoint=node.endpoint)
 
+    def node_storage_stats(self, node_id: str) -> dict[str, int]:
+        node = self.node_descriptor(node_id)
+        if node.kind != "http":
+            raise ValueError(f"Storage stats only supported for http nodes: {node_id}")
+        transport = self._transport_for(node)
+        return transport.storage_stats(node_id=node.node_id, endpoint=node.endpoint)
+
     def local_symbol_path(self, node_id: str, symbol_path: str) -> Path | None:
         node = self._nodes.get(node_id)
         if node is None or node.kind != "local":

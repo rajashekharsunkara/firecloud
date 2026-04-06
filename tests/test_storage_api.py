@@ -35,6 +35,9 @@ def test_storage_api_put_get_has_and_stats(tmp_path: Path) -> None:
     stats = client.get("/stats")
     assert stats.status_code == 200
     assert stats.json()["symbol_count"] == 1
+    assert "available_bytes" in stats.json()
+    assert "used_bytes" in stats.json()
+    assert "total_bytes" in stats.json()
 
     delete = client.delete("/symbols", params={"path": symbol_path})
     assert delete.status_code == 204
@@ -62,3 +65,22 @@ def test_storage_api_rejects_path_traversal_and_invalid_chunk_id(tmp_path: Path)
 
     bad_put = client.put("/symbols/bad/chunk/1", content=b"x")
     assert bad_put.status_code == 400
+
+
+def test_storage_api_stats_respect_total_bytes(tmp_path: Path) -> None:
+    app = create_storage_api(
+        node_id="node-test",
+        root_dir=tmp_path / "node-store",
+        total_bytes=1024,
+    )
+    client = TestClient(app)
+    payload = b"x" * 100
+    put = client.put("/symbols/chunk-1/2", content=payload)
+    assert put.status_code == 200
+
+    stats = client.get("/stats")
+    assert stats.status_code == 200
+    data = stats.json()
+    assert data["total_bytes"] == 1024
+    assert data["used_bytes"] >= 100
+    assert data["available_bytes"] <= 924

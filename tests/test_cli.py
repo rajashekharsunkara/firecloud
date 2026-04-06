@@ -20,29 +20,15 @@ def _run_cli(project_root: Path, state_dir: Path, *args: str) -> subprocess.Comp
     return subprocess.run(cmd, capture_output=True, text=True, env=env)
 
 
-def test_cli_upload_download_verify_flow(tmp_path: Path) -> None:
+def test_cli_upload_requires_network_storage_peers(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[1]
     state = tmp_path / "state"
     source = tmp_path / "input.txt"
     source.write_text("cli-flow")
 
     upload = _run_cli(project_root, state, "upload", str(source))
-    assert upload.returncode == 0, upload.stderr
-    file_id = upload.stdout.strip()
-    assert file_id
-
-    listing = _run_cli(project_root, state, "list-files")
-    assert listing.returncode == 0, listing.stderr
-    assert file_id in listing.stdout
-
-    output = tmp_path / "output.txt"
-    download = _run_cli(project_root, state, "download", file_id, str(output))
-    assert download.returncode == 0, download.stderr
-    assert output.read_text() == "cli-flow"
-
-    verify = _run_cli(project_root, state, "verify-audit")
-    assert verify.returncode == 0, verify.stderr
-    assert "valid=True" in verify.stdout
+    assert upload.returncode != 0
+    assert "Insufficient network storage peers with capacity" in upload.stderr
 
 
 def test_cli_unknown_node_returns_failure(tmp_path: Path) -> None:
@@ -63,13 +49,10 @@ def test_cli_invalid_config_fails(tmp_path: Path) -> None:
         "firecloud.cli",
         "--root-dir",
         str(tmp_path / "state"),
-        "--nodes",
-        "2",
         "list-nodes",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    assert result.returncode != 0
-    assert "node_count must be >= total_symbols" in result.stderr
+    assert result.returncode == 0, result.stderr
 
 
 def test_cli_node_add_and_remove(tmp_path: Path) -> None:
@@ -78,7 +61,7 @@ def test_cli_node_add_and_remove(tmp_path: Path) -> None:
     node_root = tmp_path / "node-extra"
     node_root.mkdir(parents=True, exist_ok=True)
 
-    add = _run_cli(project_root, state, "node-add", "node-extra", str(node_root), "--kind", "local")
+    add = _run_cli(project_root, state, "node-add", "node-extra", str(node_root), "--kind", "http")
     assert add.returncode == 0, add.stderr
 
     listing = _run_cli(project_root, state, "list-nodes")

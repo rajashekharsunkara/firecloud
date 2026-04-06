@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "802718577477",
+    "project_id": "firecloud-d1d99",
+    "storage_bucket": "firecloud-d1d99.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:802718577477:android:83a766edb672108788842c",
+        "android_client_info": {
+          "package_name": "com.firecloud.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "802718577477-enqcei3hj1pu5miag7v6v3bb4u4juga5.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.firecloud.app",
+            "certificate_hash": "e5821ef77f26463e1a12af83b2a7381e27860e58"
+          }
+        },
+        {
+          "client_id": "802718577477-cqm8n897sp24tqgtovdm14kg4c3bualh.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDzpYocS7LkLNLzuSvOIKOkGfBMisKJRCo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "802718577477-cqm8n897sp24tqgtovdm14kg4c3bualh.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

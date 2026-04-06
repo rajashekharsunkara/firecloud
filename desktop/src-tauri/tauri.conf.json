@@ -1,0 +1,71 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicknisi/tauri/v2/tooling/cli/schema.json",
+  "productName": "FireCloud",
+  "version": "1.0.0",
+  "identifier": "com.firecloud.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "FireCloud",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "center": true,
+        "decorations": true,
+        "fullscreen": false,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        {
+          "identifier": "main-window-permissions",
+          "description": "Allow core IPC and file dialogs for the main window",
+          "windows": ["*"],
+          "permissions": [
+            "core:default",
+            "dialog:default",
+            "dialog:allow-open",
+            "dialog:allow-save"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "externalBin": [],
+    "copyright": "Copyright 2024 FireCloud",
+    "category": "Utility",
+    "shortDescription": "Distributed Storage System",
+    "longDescription": "FireCloud is a decentralized, encrypted, fault-tolerant storage system.",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {}
+}

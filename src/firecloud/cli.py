@@ -15,11 +15,16 @@ from .tui.app import FireCloudTUI
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="FireCloud Python MVP")
     parser.add_argument("--root-dir", default=".firecloud", help="State directory")
-    parser.add_argument("--nodes", type=int, default=5, help="Number of local simulated nodes")
     parser.add_argument("--source-symbols", type=int, default=3, help="RaptorQ source symbols (k)")
     parser.add_argument("--total-symbols", type=int, default=5, help="RaptorQ total symbols (n)")
     parser.add_argument(
         "--symbol-size", type=int, default=64 * 1024, help="RaptorQ symbol size in bytes"
+    )
+    parser.add_argument(
+        "--bootstrap-peer",
+        action="append",
+        default=[],
+        help="Bootstrap peer base URL for discovery (repeatable)",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -43,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_node = sub.add_parser("node-add", help="Add a node")
     add_node.add_argument("node_id")
     add_node.add_argument("endpoint")
-    add_node.add_argument("--kind", default="local", choices=["local", "http"])
+    add_node.add_argument("--kind", default="http", choices=["http"])
 
     remove_node = sub.add_parser("node-remove", help="Remove a node")
     remove_node.add_argument("node_id")
@@ -75,7 +80,12 @@ def _controller_from_args(args: argparse.Namespace) -> FireCloudController:
         total_symbols=args.total_symbols,
         symbol_size=args.symbol_size,
     )
-    config = FireCloudConfig(root_dir=Path(args.root_dir), node_count=args.nodes, fec=fec)
+    config = FireCloudConfig(
+        root_dir=Path(args.root_dir),
+        fec=fec,
+        decentralized_mode=True,
+        bootstrap_peers=tuple(args.bootstrap_peer),
+    )
     return FireCloudController(config=config)
 
 

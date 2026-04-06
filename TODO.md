@@ -86,7 +86,7 @@ Not yet implemented from `plan.md`:
   - Switching transport implementation does not change controller logic.
 
 ### FC-202 Peer bootstrap and discovery
-- [ ] Add bootstrap peer list and active peer refresh process.
+- [x] Add bootstrap peer list and active peer refresh process.
 - Files:
   - `src/firecloud/discovery.py` (new)
   - `src/firecloud/config.py` (bootstrap endpoints)
