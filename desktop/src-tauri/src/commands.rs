@@ -80,9 +80,34 @@ pub async fn upload_file(
     
     let file_bytes = std::fs::read(&file_path).map_err(|e| e.to_string())?;
     
+    // URL-encode the filename to handle special characters
+    let encoded_name: String = file_name
+        .chars()
+        .map(|c| match c {
+            ' ' => "%20".to_string(),
+            '!' => "%21".to_string(),
+            '#' => "%23".to_string(),
+            '$' => "%24".to_string(),
+            '%' => "%25".to_string(),
+            '&' => "%26".to_string(),
+            '\'' => "%27".to_string(),
+            '(' => "%28".to_string(),
+            ')' => "%29".to_string(),
+            '+' => "%2B".to_string(),
+            ',' => "%2C".to_string(),
+            ';' => "%3B".to_string(),
+            '=' => "%3D".to_string(),
+            '?' => "%3F".to_string(),
+            '@' => "%40".to_string(),
+            '[' => "%5B".to_string(),
+            ']' => "%5D".to_string(),
+            _ => c.to_string(),
+        })
+        .collect();
+    
     let client = reqwest::Client::new();
     let response = client
-        .post(format!("{}/files/upload?file_name={}", settings.server_url, file_name))
+        .post(format!("{}/files/upload?file_name={}", settings.server_url, encoded_name))
         .header("Content-Type", "application/octet-stream")
         .body(file_bytes)
         .send()

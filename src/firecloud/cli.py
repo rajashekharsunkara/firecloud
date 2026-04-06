@@ -63,6 +63,8 @@ def _build_parser() -> argparse.ArgumentParser:
     api = sub.add_parser("run-api", help="Run FastAPI server")
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8080)
+    api.add_argument("--local-mode", action="store_true", 
+                     help="Use local nodes instead of requiring HTTP peers (development)")
 
     storage_api = sub.add_parser("run-storage-node", help="Run storage-node API")
     storage_api.add_argument("--node-id", required=True)
@@ -80,10 +82,12 @@ def _controller_from_args(args: argparse.Namespace) -> FireCloudController:
         total_symbols=args.total_symbols,
         symbol_size=args.symbol_size,
     )
+    # Use local mode for development/testing, decentralized for production
+    decentralized = not getattr(args, 'local_mode', False)
     config = FireCloudConfig(
         root_dir=Path(args.root_dir),
         fec=fec,
-        decentralized_mode=True,
+        decentralized_mode=decentralized,
         bootstrap_peers=tuple(args.bootstrap_peer),
     )
     return FireCloudController(config=config)

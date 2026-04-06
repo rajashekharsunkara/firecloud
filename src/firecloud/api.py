@@ -365,6 +365,12 @@ def create_api(
         state = role_manager.get_state()
         return state.to_dict()
 
+    @app.get("/node/role")
+    def get_node_role() -> dict[str, str]:
+        """Get current node role."""
+        state = role_manager.get_state()
+        return {"role": state.role.value}
+
     @app.post("/node/role")
     def set_node_role(payload: NodeRoleRequest) -> dict[str, object]:
         try:
