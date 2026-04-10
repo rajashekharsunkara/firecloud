@@ -6,7 +6,8 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Web Client ID from Firebase Console - needed for Google Sign-In v7
-const _serverClientId = '802718577477-cqm8n897sp24tqgtovdm14kg4c3bualh.apps.googleusercontent.com';
+const _serverClientId =
+    '802718577477-cqm8n897sp24tqgtovdm14kg4c3bualh.apps.googleusercontent.com';
 
 /// User authentication state.
 class AuthState {
@@ -78,10 +79,10 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   static const _authKey = 'firecloud_auth_state';
 
-  AuthNotifier(this._prefs) 
-      : _googleSignIn = GoogleSignIn.instance,
-        _firebaseAuth = FirebaseAuth.instance,
-        super(const AuthState()) {
+  AuthNotifier(this._prefs)
+    : _googleSignIn = GoogleSignIn.instance,
+      _firebaseAuth = FirebaseAuth.instance,
+      super(const AuthState()) {
     _loadSavedAuth();
     _initializeAndSetupListeners();
   }
@@ -124,28 +125,31 @@ class AuthNotifier extends StateNotifier<AuthState> {
     });
 
     // Listen to Google Sign-In events
-    _googleSignIn.authenticationEvents.listen((event) async {
-      if (event is GoogleSignInAuthenticationEventSignIn) {
-        await _signInToFirebase(event.user);
-      }
-    }, onError: (error) {
-      if (error is GoogleSignInException &&
-          error.code == GoogleSignInExceptionCode.canceled) {
-        state = state.copyWith(isLoading: false, error: null);
-        return;
-      }
-      state = state.copyWith(
-        isLoading: false,
-        error: 'Sign in failed: ${error.toString()}',
-      );
-    });
+    _googleSignIn.authenticationEvents.listen(
+      (event) async {
+        if (event is GoogleSignInAuthenticationEventSignIn) {
+          await _signInToFirebase(event.user);
+        }
+      },
+      onError: (error) {
+        if (error is GoogleSignInException &&
+            error.code == GoogleSignInExceptionCode.canceled) {
+          state = state.copyWith(isLoading: false, error: null);
+          return;
+        }
+        state = state.copyWith(
+          isLoading: false,
+          error: 'Sign in failed: ${error.toString()}',
+        );
+      },
+    );
   }
 
   Future<void> _signInToFirebase(GoogleSignInAccount user) async {
     try {
       // Get the idToken from authentication
       final idToken = user.authentication.idToken;
-      
+
       if (idToken == null) {
         state = state.copyWith(
           isLoading: false,
@@ -156,10 +160,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
       // For Firebase Auth, we can use just the idToken
       // accessToken is optional and only needed for API calls
-      final credential = GoogleAuthProvider.credential(
-        idToken: idToken,
-      );
-      
+      final credential = GoogleAuthProvider.credential(idToken: idToken);
+
       // Sign in to Firebase
       await _firebaseAuth.signInWithCredential(credential);
       // State will be updated by authStateChanges listener
@@ -184,7 +186,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
   /// Uses GoogleSignIn v7 API with authenticate() method.
   Future<void> signIn() async {
     state = state.copyWith(isLoading: true, error: null);
-    
+
     try {
       // Wait for initialization if not complete
       while (!_initialized) {
@@ -222,7 +224,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
   /// Sign out.
   Future<void> signOut() async {
     state = state.copyWith(isLoading: true);
-    
+
     try {
       await _googleSignIn.signOut();
       await _firebaseAuth.signOut();
@@ -237,6 +239,13 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   /// Get user's unique ID for file ownership.
   String? get ownerId => state.userId;
+
+  /// Fetch a current Firebase ID token for authenticated backend requests.
+  Future<String?> getIdToken({bool forceRefresh = false}) async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) return null;
+    return user.getIdToken(forceRefresh);
+  }
 
   /// Check if files belong to current user.
   bool isOwner(String fileOwnerId) {

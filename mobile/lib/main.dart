@@ -28,16 +28,16 @@ final themeModeProvider = StateProvider<bool>((ref) {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // Initialize Firebase (skip on unsupported desktop platforms)
   if (Platform.isAndroid || Platform.isIOS) {
     await Firebase.initializeApp();
   }
-  
+
   // Initialize window manager for desktop platforms
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
-    
+
     const windowOptions = WindowOptions(
       size: Size(400, 800),
       minimumSize: Size(360, 600),
@@ -47,31 +47,33 @@ void main() async {
       titleBarStyle: TitleBarStyle.normal,
       title: 'FireCloud',
     );
-    
+
     await windowManager.waitUntilReadyToShow(windowOptions, () async {
       await windowManager.show();
       await windowManager.focus();
     });
-    
+
     // Initialize system tray for background mode
     await WindowsTrayService.initialize(
       onShowWindow: () {},
       onQuit: () => exit(0),
     );
   }
-  
+
   // Set system UI overlay style for immersive experience (mobile only)
   if (Platform.isAndroid || Platform.isIOS) {
-    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.light,
-      systemNavigationBarColor: Colors.black,
-      systemNavigationBarIconBrightness: Brightness.light,
-    ));
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        systemNavigationBarColor: Colors.black,
+        systemNavigationBarIconBrightness: Brightness.light,
+      ),
+    );
   }
-  
+
   final prefs = await SharedPreferences.getInstance();
-  
+
   runApp(
     ProviderScope(
       overrides: [
@@ -92,7 +94,7 @@ class NodeInitScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final nodeAsync = ref.watch(fireCloudNodeProvider);
     final theme = Theme.of(context);
-    
+
     return nodeAsync.when(
       data: (_) => const SizedBox.shrink(),
       loading: () => Scaffold(
@@ -103,21 +105,26 @@ class NodeInitScreen extends ConsumerWidget {
             children: [
               // Animated logo
               Container(
-                width: 120,
-                height: 120,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: theme.colorScheme.primary,
-                    width: 2,
-                  ),
-                ),
-                child: Icon(
-                  Icons.cloud_outlined,
-                  size: 64,
-                  color: theme.colorScheme.primary,
-                ),
-              )
+                    width: 120,
+                    height: 120,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: theme.colorScheme.primary,
+                        width: 2,
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(24),
+                        child: Image.asset(
+                          'assets/branding/app_logo.png',
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                    ),
+                  )
                   .animate(onPlay: (c) => c.repeat())
                   .scale(
                     begin: const Offset(1, 1),
@@ -155,9 +162,7 @@ class NodeInitScreen extends ConsumerWidget {
                 child: LinearProgressIndicator(
                   backgroundColor: theme.colorScheme.surfaceContainerHighest,
                   color: theme.colorScheme.primary,
-                )
-                    .animate(onPlay: (c) => c.repeat())
-                    .shimmer(duration: 1500.ms),
+                ).animate(onPlay: (c) => c.repeat()).shimmer(duration: 1500.ms),
               ),
               const SizedBox(height: 16),
               Text(
@@ -182,10 +187,7 @@ class NodeInitScreen extends ConsumerWidget {
                 color: theme.colorScheme.error,
               ).animate().shake(),
               const SizedBox(height: 24),
-              Text(
-                'Failed to start node',
-                style: theme.textTheme.titleLarge,
-              ),
+              Text('Failed to start node', style: theme.textTheme.titleLarge),
               const SizedBox(height: 8),
               Text(
                 error.toString(),
@@ -214,7 +216,8 @@ class FireCloudApp extends ConsumerStatefulWidget {
   ConsumerState<FireCloudApp> createState() => _FireCloudAppState();
 }
 
-class _FireCloudAppState extends ConsumerState<FireCloudApp> with WindowListener {
+class _FireCloudAppState extends ConsumerState<FireCloudApp>
+    with WindowListener {
   @override
   void initState() {
     super.initState();
@@ -236,8 +239,9 @@ class _FireCloudAppState extends ConsumerState<FireCloudApp> with WindowListener
   Future<void> onWindowClose() async {
     // Check if provider mode is active - if so, minimize to tray instead of closing
     final nodeConfig = await ref.read(nodeConfigProvider.future);
-    
-    if (nodeConfig.role.name == 'storageProvider' && nodeConfig.storageQuotaGB > 0) {
+
+    if (nodeConfig.role.name == 'storageProvider' &&
+        nodeConfig.storageQuotaGB > 0) {
       // Minimize to tray for background operation
       await WindowsTrayService.hideToTray();
     } else {

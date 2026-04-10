@@ -44,9 +44,30 @@ flutter pub get
 flutter build apk --release
 # Output: build/app/outputs/flutter-apk/app-release.apk (~52MB)
 
+# Build release APK with internet discovery endpoints baked in
+flutter build apk --release \
+  --dart-define=FIRECLOUD_SIGNALING_URL=https://signal.yourdomain.com \
+  --dart-define=FIRECLOUD_RELAY_URL=https://relay.yourdomain.com
+
 # Install on connected device
 adb install build/app/outputs/flutter-apk/app-release.apk
 ```
+
+You can also use the helper script:
+
+```bash
+cd /home/rajashekharsunkara/Documents/firecloud
+
+FIRECLOUD_SIGNALING_URL=https://signal.yourdomain.com \
+FIRECLOUD_RELAY_URL=https://relay.yourdomain.com \
+./scripts/build-mobile.sh release
+```
+
+Notes:
+- These values become the app defaults in the APK (no manual setup required on first launch).
+- They can still be changed later in **Settings → Internet Discovery**.
+- If you omit these defines, placeholder defaults are used and WAN discovery will not work.
+- For hardened relay deployments, users must sign in with Google so the app can send Firebase ID tokens to signaling/relay endpoints.
 
 ### Build iOS
 

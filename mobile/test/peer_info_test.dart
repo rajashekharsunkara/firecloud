@@ -7,7 +7,10 @@ void main() {
   PeerInfo makePeer({
     String? natType,
     bool includePublicUrl = true,
-    List<String> relayUrls = const ['https://relay1.example', 'https://relay2.example'],
+    List<String> relayUrls = const [
+      'https://relay1.example',
+      'https://relay2.example',
+    ],
   }) {
     return PeerInfo(
       deviceId: 'dev-1',
@@ -53,6 +56,28 @@ void main() {
 
       final asStrings = endpoints.map((u) => u.toString()).toList();
       expect(asStrings.toSet().length, equals(asStrings.length));
+    });
+
+    test('supports relay-only peers without direct endpoint', () {
+      final peer = PeerInfo(
+        deviceId: 'dev-1',
+        publicKey: 'pk',
+        ipAddress: '',
+        port: 0,
+        role: NodeRole.storageProvider,
+        availableStorageBytes: 1024,
+        lastSeen: DateTime.now(),
+        relayUrls: const ['https://relay1.example/p2p/dev-1'],
+        hasDirectEndpoint: false,
+      );
+
+      final endpoints = peer.endpointCandidates(
+        '/chunks/hash',
+        preferRelay: true,
+      );
+      expect(endpoints.map((u) => u.toString()), [
+        'https://relay1.example/p2p/dev-1/chunks/hash',
+      ]);
     });
 
     test('fromJson and toJson keep NAT and relay metadata', () {

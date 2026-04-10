@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../screens/p2p_files_screen.dart';
 import '../screens/peers_screen.dart';
+import '../screens/audit_screen.dart';
 import '../screens/node_settings_screen.dart';
 
 class _NavItem {
@@ -51,6 +52,12 @@ class _AppShellState extends ConsumerState<AppShell> {
       selectedIcon: Icons.settings,
       label: 'Settings',
     ),
+    _NavItem(
+      pathPrefix: '/audit',
+      icon: Icons.fact_check_outlined,
+      selectedIcon: Icons.fact_check,
+      label: 'Audit',
+    ),
   ];
 
   int _calculateSelectedIndex(String location, List<_NavItem> items) {
@@ -62,7 +69,10 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    final selectedIndex = _calculateSelectedIndex(widget.state.uri.path, _navItems);
+    final selectedIndex = _calculateSelectedIndex(
+      widget.state.uri.path,
+      _navItems,
+    );
     final theme = Theme.of(context);
 
     return Scaffold(
@@ -79,7 +89,10 @@ class _AppShellState extends ConsumerState<AppShell> {
         destinations: _navItems.map((item) {
           return NavigationDestination(
             icon: Icon(item.icon),
-            selectedIcon: Icon(item.selectedIcon, color: theme.colorScheme.primary),
+            selectedIcon: Icon(
+              item.selectedIcon,
+              color: theme.colorScheme.primary,
+            ),
             label: item.label,
           );
         }).toList(),
@@ -99,27 +112,40 @@ final appRouter = GoRouter(
           path: '/files',
           pageBuilder: (context, state) => CustomTransitionPage(
             child: const FilesScreen(),
-            transitionsBuilder: (context, animation, secondaryAnimation, child) {
-              return FadeTransition(opacity: animation, child: child);
-            },
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
+                  return FadeTransition(opacity: animation, child: child);
+                },
           ),
         ),
         GoRoute(
           path: '/peers',
           pageBuilder: (context, state) => CustomTransitionPage(
             child: const PeersScreen(),
-            transitionsBuilder: (context, animation, secondaryAnimation, child) {
-              return FadeTransition(opacity: animation, child: child);
-            },
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
+                  return FadeTransition(opacity: animation, child: child);
+                },
           ),
         ),
         GoRoute(
           path: '/node',
           pageBuilder: (context, state) => CustomTransitionPage(
             child: const NodeSettingsScreen(),
-            transitionsBuilder: (context, animation, secondaryAnimation, child) {
-              return FadeTransition(opacity: animation, child: child);
-            },
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
+                  return FadeTransition(opacity: animation, child: child);
+                },
+          ),
+        ),
+        GoRoute(
+          path: '/audit',
+          pageBuilder: (context, state) => CustomTransitionPage(
+            child: const AuditScreen(),
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
+                  return FadeTransition(opacity: animation, child: child);
+                },
           ),
         ),
       ],

@@ -59,9 +59,7 @@ class PeersScreen extends ConsumerWidget {
           // Content
           peersAsync.when(
             data: (peers) => peers.isEmpty
-                ? SliverFillRemaining(
-                    child: _buildEmptyState(context, theme),
-                  )
+                ? SliverFillRemaining(child: _buildEmptyState(context, theme))
                 : _buildPeersList(context, peers, theme),
             loading: () => const SliverFillRemaining(
               child: Center(child: CircularProgressIndicator()),
@@ -71,7 +69,11 @@ class PeersScreen extends ConsumerWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.error_outline, size: 48, color: theme.colorScheme.error),
+                    Icon(
+                      Icons.error_outline,
+                      size: 48,
+                      color: theme.colorScheme.error,
+                    ),
                     const SizedBox(height: 16),
                     Text('Error: $error'),
                     const SizedBox(height: 16),
@@ -95,23 +97,26 @@ class PeersScreen extends ConsumerWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Container(
-            width: 100,
-            height: 100,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: theme.colorScheme.outline.withValues(alpha: 0.2),
-                width: 2,
-              ),
-            ),
-            child: Icon(
-              Icons.wifi_find,
-              size: 48,
-              color: theme.colorScheme.outline,
-            ),
-          )
+                width: 100,
+                height: 100,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: theme.colorScheme.outline.withValues(alpha: 0.2),
+                    width: 2,
+                  ),
+                ),
+                child: Icon(
+                  Icons.wifi_find,
+                  size: 48,
+                  color: theme.colorScheme.outline,
+                ),
+              )
               .animate(onPlay: (c) => c.repeat())
-              .shimmer(duration: 2000.ms, color: theme.colorScheme.primary.withValues(alpha: 0.3)),
+              .shimmer(
+                duration: 2000.ms,
+                color: theme.colorScheme.primary.withValues(alpha: 0.3),
+              ),
           const SizedBox(height: 24),
           Text(
             'Searching for peers',
@@ -123,7 +128,7 @@ class PeersScreen extends ConsumerWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 48),
             child: Text(
-              'Make sure other FireCloud devices are connected to the same network',
+              'For LAN discovery, keep devices on the same WiFi. For internet discovery, sign in and set signaling URL in Settings.',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
               ),
@@ -151,7 +156,7 @@ class PeersScreen extends ConsumerWidget {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    'Peers announce every 30 seconds using mDNS multicast',
+                    'LAN discovery uses mDNS. WAN discovery requires a reachable signaling server.',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
                     ),
@@ -165,7 +170,11 @@ class PeersScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildPeersList(BuildContext context, List<PeerInfo> peers, ThemeData theme) {
+  Widget _buildPeersList(
+    BuildContext context,
+    List<PeerInfo> peers,
+    ThemeData theme,
+  ) {
     final storageProviders = peers.where((p) => p.isStorageProvider).toList();
     final consumers = peers.where((p) => !p.isStorageProvider).toList();
 
@@ -215,25 +224,41 @@ class PeersScreen extends ConsumerWidget {
               count: storageProviders.length,
             ).animate().fadeIn(delay: 200.ms).slideX(begin: -0.1),
             const SizedBox(height: 12),
-            ...storageProviders.asMap().entries.map((entry) => _PeerCard(
-                  peer: entry.value,
-                  index: entry.key,
-                ).animate().fadeIn(delay: Duration(milliseconds: 250 + entry.key * 50)).slideX(begin: 0.1)),
+            ...storageProviders.asMap().entries.map(
+              (entry) => _PeerCard(peer: entry.value, index: entry.key)
+                  .animate()
+                  .fadeIn(delay: Duration(milliseconds: 250 + entry.key * 50))
+                  .slideX(begin: 0.1),
+            ),
             const SizedBox(height: 24),
           ],
 
           // Consumers Section
           if (consumers.isNotEmpty) ...[
             _SectionHeader(
-              title: 'Consumers',
-              icon: Icons.devices_outlined,
-              count: consumers.length,
-            ).animate().fadeIn(delay: Duration(milliseconds: 300 + storageProviders.length * 50)).slideX(begin: -0.1),
+                  title: 'Consumers',
+                  icon: Icons.devices_outlined,
+                  count: consumers.length,
+                )
+                .animate()
+                .fadeIn(
+                  delay: Duration(
+                    milliseconds: 300 + storageProviders.length * 50,
+                  ),
+                )
+                .slideX(begin: -0.1),
             const SizedBox(height: 12),
-            ...consumers.asMap().entries.map((entry) => _PeerCard(
-                  peer: entry.value,
-                  index: entry.key,
-                ).animate().fadeIn(delay: Duration(milliseconds: 350 + (storageProviders.length + entry.key) * 50)).slideX(begin: 0.1)),
+            ...consumers.asMap().entries.map(
+              (entry) => _PeerCard(peer: entry.value, index: entry.key)
+                  .animate()
+                  .fadeIn(
+                    delay: Duration(
+                      milliseconds:
+                          350 + (storageProviders.length + entry.key) * 50,
+                    ),
+                  )
+                  .slideX(begin: 0.1),
+            ),
           ],
         ]),
       ),
@@ -305,11 +330,7 @@ class _SectionHeader extends StatelessWidget {
     final theme = Theme.of(context);
     return Row(
       children: [
-        Icon(
-          icon,
-          size: 18,
-          color: theme.colorScheme.primary,
-        ),
+        Icon(icon, size: 18, color: theme.colorScheme.primary),
         const SizedBox(width: 8),
         Text(
           title.toUpperCase(),
@@ -350,6 +371,10 @@ class _PeerCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isOnline = peer.isOnline;
+    final endpointLabel =
+        (peer.hasDirectEndpoint && peer.ipAddress.isNotEmpty && peer.port > 0)
+        ? '${peer.ipAddress}:${peer.port}'
+        : (peer.relayUrls.isNotEmpty ? 'relay-only' : 'unreachable');
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -390,7 +415,9 @@ class _PeerCard extends StatelessWidget {
                       height: 12,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: isOnline ? theme.colorScheme.primary : theme.colorScheme.outline,
+                        color: isOnline
+                            ? theme.colorScheme.primary
+                            : theme.colorScheme.outline,
                         border: Border.all(
                           color: theme.colorScheme.surfaceContainerHighest,
                           width: 2,
@@ -418,17 +445,24 @@ class _PeerCard extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
                         decoration: BoxDecoration(
                           color: isOnline
                               ? theme.colorScheme.primary.withValues(alpha: 0.1)
-                              : theme.colorScheme.outline.withValues(alpha: 0.1),
+                              : theme.colorScheme.outline.withValues(
+                                  alpha: 0.1,
+                                ),
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(
                           isOnline ? 'Online' : 'Offline',
                           style: theme.textTheme.labelSmall?.copyWith(
-                            color: isOnline ? theme.colorScheme.primary : theme.colorScheme.outline,
+                            color: isOnline
+                                ? theme.colorScheme.primary
+                                : theme.colorScheme.outline,
                           ),
                         ),
                       ),
@@ -438,9 +472,11 @@ class _PeerCard extends StatelessWidget {
                   Row(
                     children: [
                       Text(
-                        '${peer.ipAddress}:${peer.port}',
+                        endpointLabel,
                         style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                          color: theme.colorScheme.onSurface.withValues(
+                            alpha: 0.6,
+                          ),
                         ),
                       ),
                       if (peer.isStorageProvider) ...[
@@ -450,7 +486,9 @@ class _PeerCard extends StatelessWidget {
                           margin: const EdgeInsets.symmetric(horizontal: 8),
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: theme.colorScheme.outline.withValues(alpha: 0.5),
+                            color: theme.colorScheme.outline.withValues(
+                              alpha: 0.5,
+                            ),
                           ),
                         ),
                         Icon(

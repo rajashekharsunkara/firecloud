@@ -1,0 +1,12 @@
+# Exclude local development artifacts from source uploads.
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.pytest_cache/
+.mypy_cache/
+.git/
+.gitignore
