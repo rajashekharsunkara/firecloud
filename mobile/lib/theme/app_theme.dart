@@ -18,11 +18,11 @@ class AppTheme {
   static const _grey700 = Color(0xFF616161);
   static const _grey800 = Color(0xFF424242);
   static const _grey900 = Color(0xFF212121);
-
+  
   // Accent for important actions (subtle teal/cyan)
   static const _accent = Color(0xFF00BFA5);
   static const _accentDark = Color(0xFF1DE9B6);
-
+  
   // Error color
   static const _error = Color(0xFFCF6679);
   static const _errorLight = Color(0xFFB00020);
@@ -70,7 +70,9 @@ class AppTheme {
       cardTheme: CardThemeData(
         elevation: 0,
         color: _grey50,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
         margin: EdgeInsets.zero,
       ),
       floatingActionButtonTheme: FloatingActionButtonThemeData(
@@ -78,31 +80,15 @@ class AppTheme {
         highlightElevation: 0,
         backgroundColor: _black,
         foregroundColor: _white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           elevation: 0,
           backgroundColor: _black,
           foregroundColor: _white,
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          textStyle: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
-          ),
-        ),
-      ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          elevation: 0,
-          backgroundColor: _black,
-          foregroundColor: _white,
-          disabledBackgroundColor: _grey300,
-          disabledForegroundColor: _grey600,
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
@@ -132,34 +118,28 @@ class AppTheme {
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: _white,
+        fillColor: _grey100,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: _grey300, width: 1.2),
+          borderSide: BorderSide.none,
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: _grey300, width: 1.2),
+          borderSide: BorderSide.none,
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: _black, width: 1.8),
+          borderSide: const BorderSide(color: _black, width: 2),
         ),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 20,
-          vertical: 18,
-        ),
-        labelStyle: const TextStyle(color: _grey700),
-        floatingLabelStyle: const TextStyle(
-          color: _black,
-          fontWeight: FontWeight.w600,
-        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
         hintStyle: TextStyle(color: _grey500),
       ),
       chipTheme: ChipThemeData(
         backgroundColor: _grey100,
         labelStyle: const TextStyle(color: _black, fontWeight: FontWeight.w500),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
         side: BorderSide.none,
       ),
       navigationBarTheme: NavigationBarThemeData(
@@ -266,7 +246,9 @@ class AppTheme {
       cardTheme: CardThemeData(
         elevation: 0,
         color: _grey900,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
         margin: EdgeInsets.zero,
       ),
       floatingActionButtonTheme: FloatingActionButtonThemeData(
@@ -274,33 +256,15 @@ class AppTheme {
         highlightElevation: 0,
         backgroundColor: _white,
         foregroundColor: _black,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           elevation: 0,
-          backgroundColor: _grey300,
+          backgroundColor: _white,
           foregroundColor: _black,
-          disabledBackgroundColor: _grey800,
-          disabledForegroundColor: _grey600,
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          textStyle: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
-          ),
-        ),
-      ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          elevation: 0,
-          backgroundColor: _grey300,
-          foregroundColor: _black,
-          disabledBackgroundColor: _grey800,
-          disabledForegroundColor: _grey600,
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
@@ -330,34 +294,28 @@ class AppTheme {
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: _grey800,
+        fillColor: _grey900,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: _grey600, width: 1.2),
+          borderSide: BorderSide.none,
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: _grey600, width: 1.2),
+          borderSide: BorderSide.none,
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: _white, width: 1.8),
+          borderSide: const BorderSide(color: _white, width: 2),
         ),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 20,
-          vertical: 18,
-        ),
-        labelStyle: const TextStyle(color: _grey400),
-        floatingLabelStyle: const TextStyle(
-          color: _white,
-          fontWeight: FontWeight.w600,
-        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
         hintStyle: TextStyle(color: _grey500),
       ),
       chipTheme: ChipThemeData(
         backgroundColor: _grey800,
         labelStyle: const TextStyle(color: _white, fontWeight: FontWeight.w500),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
         side: BorderSide.none,
       ),
       navigationBarTheme: NavigationBarThemeData(
@@ -409,11 +367,11 @@ class AppTheme {
       ),
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) return _grey200;
+          if (states.contains(WidgetState.selected)) return _white;
           return _grey600;
         }),
         trackColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) return _grey500;
+          if (states.contains(WidgetState.selected)) return _grey700;
           return _grey800;
         }),
       ),

@@ -20,7 +20,7 @@ class LocalStorage {
   late Directory _manifestCacheDir;
   late File _chunkRefsFile;
   final Map<String, Set<String>> _chunkRefs = {};
-
+  
   final NodeRoleManager roleManager;
   int _storedBytes = 0;
 
@@ -30,19 +30,19 @@ class LocalStorage {
   Future<void> initialize() async {
     final appDir = await getApplicationDocumentsDirectory();
     final fireCloudDir = Directory('${appDir.path}/firecloud');
-
+    
     _chunksDir = Directory('${fireCloudDir.path}/chunks');
     _manifestsDir = Directory('${fireCloudDir.path}/manifests');
     _cacheDir = Directory('${fireCloudDir.path}/cache');
     _manifestCacheDir = Directory('${fireCloudDir.path}/manifest_cache');
     _chunkRefsFile = File('${fireCloudDir.path}/chunk_refs.json');
-
+    
     await _chunksDir.create(recursive: true);
     await _manifestsDir.create(recursive: true);
     await _cacheDir.create(recursive: true);
     await _manifestCacheDir.create(recursive: true);
     await _loadChunkReferences();
-
+    
     // Calculate stored bytes
     await _calculateStoredBytes();
   }
@@ -51,7 +51,7 @@ class LocalStorage {
   Future<void> storeChunk(String hash, Uint8List data) async {
     final file = File('${_chunksDir.path}/$hash');
     if (await file.exists()) return; // Deduplication
-
+    
     // Check quota for storage providers
     if (roleManager.isStorageProvider) {
       if (!roleManager.canStore(data.length)) {
@@ -60,7 +60,7 @@ class LocalStorage {
         );
       }
     }
-
+    
     await file.writeAsBytes(data);
     _storedBytes += data.length;
     await roleManager.updateUsedStorage(_storedBytes);
@@ -205,8 +205,7 @@ class LocalStorage {
     await for (final entity in _manifestCacheDir.list()) {
       if (entity is! File || !entity.path.endsWith('.json')) continue;
       try {
-        final parsed =
-            jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
+        final parsed = jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
         cached.add(parsed);
       } catch (_) {
         // Skip corrupted cache entries.
@@ -321,15 +320,11 @@ class ChunkDistributor {
   final LocalStorage localStorage;
   final PeerDiscovery peerDiscovery;
   final DeviceIdentity identity;
-  final String? accountId;
-  final Future<String?> Function()? authTokenProvider;
 
   ChunkDistributor({
     required this.localStorage,
     required this.peerDiscovery,
     required this.identity,
-    this.accountId,
-    this.authTokenProvider,
   });
 
   /// Distribute chunks to storage providers on the network.
@@ -348,22 +343,17 @@ class ChunkDistributor {
       if (providers.isEmpty) {
         if (isProviderNode) {
           for (final chunk in chunks) {
-            final encrypted = ChunkEncryption.encrypt(
-              chunk.data,
-              encryptionKey,
-            );
+            final encrypted = ChunkEncryption.encrypt(chunk.data, encryptionKey);
             final existed = await localStorage.hasChunk(chunk.hash);
             await localStorage.storeChunk(chunk.hash, encrypted);
             await localStorage.addChunkReference(chunk.hash, fileId);
             if (!existed) newlyStoredLocalChunkHashes.add(chunk.hash);
-            refs.add(
-              ChunkRef(
-                hash: chunk.hash,
-                offset: chunk.offset,
-                size: chunk.size,
-                nodeIds: [identity.deviceId],
-              ),
-            );
+            refs.add(ChunkRef(
+              hash: chunk.hash,
+              offset: chunk.offset,
+              size: chunk.size,
+              nodeIds: [identity.deviceId],
+            ));
           }
           return refs;
         }
@@ -380,8 +370,7 @@ class ChunkDistributor {
         0,
         (total, provider) => total + provider.availableStorageBytes,
       );
-      if (!isProviderNode &&
-          totalAvailableProviderBytes < requiredProviderBytes) {
+      if (!isProviderNode && totalAvailableProviderBytes < requiredProviderBytes) {
         throw P2PStorageUnavailableError(
           'Not enough provider capacity on network '
           '(available=$totalAvailableProviderBytes bytes, required=$requiredProviderBytes bytes)',
@@ -421,26 +410,24 @@ class ChunkDistributor {
         final remoteNodeIds = uploadResults.whereType<String>().toList();
         nodeIds.addAll(remoteNodeIds);
 
-        if (!isProviderNode && remoteNodeIds.isEmpty) {
-          throw UploadReplicationFailedError(
-            'Upload could not reach any storage provider for chunk ${chunk.hash}',
-          );
-        }
-
-        if (isProviderNode && remoteNodeIds.isEmpty && providers.isNotEmpty) {
-          throw UploadReplicationFailedError(
-            'Upload could not replicate to any remote storage provider for chunk ${chunk.hash}',
-          );
-        }
-
-        refs.add(
-          ChunkRef(
-            hash: chunk.hash,
-            offset: chunk.offset,
-            size: chunk.size,
-            nodeIds: nodeIds,
-          ),
+      if (!isProviderNode && remoteNodeIds.isEmpty) {
+        throw UploadReplicationFailedError(
+          'Upload could not reach any storage provider for chunk ${chunk.hash}',
         );
+      }
+
+      if (isProviderNode && remoteNodeIds.isEmpty && providers.isNotEmpty) {
+        throw UploadReplicationFailedError(
+          'Upload could not replicate to any remote storage provider for chunk ${chunk.hash}',
+        );
+      }
+
+      refs.add(ChunkRef(
+          hash: chunk.hash,
+          offset: chunk.offset,
+          size: chunk.size,
+          nodeIds: nodeIds,
+        ));
       }
       return refs;
     } catch (e) {
@@ -458,7 +445,7 @@ class ChunkDistributor {
   ) async {
     final buffer = Uint8List(manifest.fileSize);
     final allowLocalRead = localStorage.roleManager.isStorageProvider;
-
+    
     for (final chunkRef in manifest.chunks) {
       Uint8List? encrypted;
 
@@ -471,17 +458,9 @@ class ChunkDistributor {
       if (encrypted == null) {
         for (final nodeId in chunkRef.nodeIds) {
           if (nodeId == identity.deviceId) continue;
-
+          
           final peer = peerDiscovery.getPeer(nodeId);
-          if (peer == null || !peer.isOnline) {
-            try {
-              encrypted = await _getChunkFromRelayNode(nodeId, chunkRef.hash);
-              if (encrypted != null) break;
-            } catch (_) {
-              // Try next node.
-            }
-            continue;
-          }
+          if (peer == null || !peer.isOnline) continue;
 
           try {
             encrypted = await _getChunkFromPeer(peer, chunkRef.hash);
@@ -500,34 +479,24 @@ class ChunkDistributor {
 
       // Decrypt and copy to buffer
       final decrypted = ChunkEncryption.decrypt(encrypted, encryptionKey);
-      buffer.setRange(
-        chunkRef.offset,
-        chunkRef.offset + chunkRef.size,
-        decrypted,
-      );
+      buffer.setRange(chunkRef.offset, chunkRef.offset + chunkRef.size, decrypted);
     }
 
     return buffer;
   }
 
   /// Delete a chunk copy from peer if it exists.
-  Future<void> deleteChunkFromPeer(
-    PeerInfo peer,
-    String hash,
-    String fileId,
-  ) async {
-    final endpoints = _chunkEndpointsForPeer(peer, hash);
+  Future<void> deleteChunkFromPeer(PeerInfo peer, String hash, String fileId) async {
+    final endpoints = peer.endpointCandidates('/chunks/$hash', preferRelay: true);
     Object? lastError;
     for (final endpoint in endpoints) {
       final client = HttpClient();
       try {
         final request = await client.deleteUrl(endpoint);
-        await _attachAuthHeaders(request);
+        request.headers.set('X-Device-ID', identity.deviceId);
         request.headers.set('X-File-ID', fileId);
         final response = await request.close();
-        if (response.statusCode == 200 ||
-            response.statusCode == 204 ||
-            response.statusCode == 404) {
+        if (response.statusCode == 200 || response.statusCode == 204 || response.statusCode == 404) {
           return;
         }
         lastError = Exception('Failed to delete chunk: ${response.statusCode}');
@@ -540,31 +509,6 @@ class ChunkDistributor {
     throw lastError ?? Exception('Failed to delete chunk from any endpoint');
   }
 
-  /// Delete a chunk copy from relay cache when peer is offline/unreachable.
-  Future<void> deleteChunkFromRelayNode(
-    String nodeId,
-    String hash,
-    String fileId,
-  ) async {
-    final relayEndpoint = _relayChunkEndpointForNode(nodeId, hash);
-    if (relayEndpoint == null) return;
-    final client = HttpClient();
-    try {
-      final request = await client.deleteUrl(relayEndpoint);
-      await _attachAuthHeaders(request);
-      request.headers.set('X-File-ID', fileId);
-      final response = await request.close();
-      if (response.statusCode == 200 ||
-          response.statusCode == 204 ||
-          response.statusCode == 404) {
-        return;
-      }
-      throw Exception('Failed to delete relay chunk: ${response.statusCode}');
-    } finally {
-      client.close();
-    }
-  }
-
   /// Send chunk to peer via HTTP.
   Future<void> _sendChunkToPeer(
     PeerInfo peer,
@@ -572,14 +516,14 @@ class ChunkDistributor {
     Uint8List data,
     String fileId,
   ) async {
-    final endpoints = _chunkEndpointsForPeer(peer, hash);
+    final endpoints = peer.endpointCandidates('/chunks/$hash', preferRelay: true);
     Object? lastError;
     for (final endpoint in endpoints) {
       final client = HttpClient();
       try {
         final request = await client.postUrl(endpoint);
         request.headers.set('Content-Type', 'application/octet-stream');
-        await _attachAuthHeaders(request);
+        request.headers.set('X-Device-ID', identity.deviceId);
         request.headers.set('X-File-ID', fileId);
         request.add(data);
         final response = await request.close();
@@ -604,12 +548,12 @@ class ChunkDistributor {
 
   /// Get chunk from peer via HTTP.
   Future<Uint8List?> _getChunkFromPeer(PeerInfo peer, String hash) async {
-    final endpoints = _chunkEndpointsForPeer(peer, hash);
+    final endpoints = peer.endpointCandidates('/chunks/$hash', preferRelay: true);
     for (final endpoint in endpoints) {
       final client = HttpClient();
       try {
         final request = await client.getUrl(endpoint);
-        await _attachAuthHeaders(request);
+        request.headers.set('X-Device-ID', identity.deviceId);
         final response = await request.close();
         if (response.statusCode == 200) {
           final bytes = await response.fold<List<int>>(
@@ -625,73 +569,6 @@ class ChunkDistributor {
       }
     }
     return null;
-  }
-
-  Future<Uint8List?> _getChunkFromRelayNode(String nodeId, String hash) async {
-    final endpoint = _relayChunkEndpointForNode(nodeId, hash);
-    if (endpoint == null) return null;
-    final client = HttpClient();
-    try {
-      final request = await client.getUrl(endpoint);
-      await _attachAuthHeaders(request);
-      final response = await request.close();
-      if (response.statusCode != 200) return null;
-      final bytes = await response.fold<List<int>>(
-        [],
-        (prev, chunk) => prev..addAll(chunk),
-      );
-      return Uint8List.fromList(bytes);
-    } finally {
-      client.close();
-    }
-  }
-
-  List<Uri> _chunkEndpointsForPeer(PeerInfo peer, String hash) {
-    final endpoints = peer.endpointCandidates(
-      '/chunks/$hash',
-      preferRelay: true,
-    );
-    final relayEndpoint = _relayChunkEndpointForNode(peer.deviceId, hash);
-    if (relayEndpoint != null &&
-        !endpoints.any((uri) => uri.toString() == relayEndpoint.toString())) {
-      endpoints.insert(0, relayEndpoint);
-    }
-    return endpoints;
-  }
-
-  Uri? _relayChunkEndpointForNode(String nodeId, String hash) {
-    final base = _normalizeRelayBaseUrl(peerDiscovery.relayBaseUrl);
-    if (base.isEmpty || nodeId.isEmpty) return null;
-    return Uri.parse('$base/p2p/$nodeId/chunks/$hash');
-  }
-
-  String _normalizeRelayBaseUrl(String value) {
-    final trimmed = value.trim();
-    if (trimmed.isEmpty) return '';
-    return trimmed.endsWith('/')
-        ? trimmed.substring(0, trimmed.length - 1)
-        : trimmed;
-  }
-
-  Future<void> _attachAuthHeaders(HttpClientRequest request) async {
-    request.headers.set('X-Device-ID', identity.deviceId);
-    final ownerId = accountId?.trim();
-    if (ownerId != null && ownerId.isNotEmpty) {
-      request.headers.set('X-Account-ID', ownerId);
-    }
-    final tokenProvider = authTokenProvider;
-    if (tokenProvider == null) return;
-    try {
-      final token = await tokenProvider();
-      if (token != null && token.isNotEmpty) {
-        request.headers.set('Authorization', 'Bearer $token');
-      }
-    } catch (e) {
-      developer.log(
-        'Unable to fetch Firebase auth token for chunk request: $e',
-        name: 'firecloud.local_storage',
-      );
-    }
   }
 }
 

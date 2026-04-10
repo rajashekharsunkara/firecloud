@@ -1,7 +1,7 @@
 name: firecloud_mobile
 description: "FireCloud distributed storage - fully decentralized P2P"
 publish_to: 'none'
-version: 2042.0.0+2042
+version: 2037.0.0+2037
 
 environment:
   sdk: ^3.11.4
@@ -78,8 +78,10 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  assets:
-    - assets/branding/
+  # To add assets to your application, add an assets section, like this:
+  # assets:
+  #   - images/a_dot_burr.jpeg
+  #   - images/a_dot_ham.jpeg
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

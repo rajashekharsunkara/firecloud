@@ -29,9 +29,7 @@ class StorageLockState {
     this.error,
   });
 
-  int get availableToLock =>
-      freeDeviceBytes >
-          (1024 * 1024 * 1024) // Leave 1GB buffer
+  int get availableToLock => freeDeviceBytes > (1024 * 1024 * 1024) // Leave 1GB buffer
       ? freeDeviceBytes - (1024 * 1024 * 1024)
       : 0;
 
@@ -74,7 +72,7 @@ class StorageLockState {
   String get recommendationText {
     final recGB = recommendedBytes / (1024 * 1024 * 1024);
     final freeGB = freeDeviceBytes / (1024 * 1024 * 1024);
-
+    
     if (recommendedBytes == 0) {
       return 'Not enough free space. You have ${freeGB.toStringAsFixed(1)} GB free.';
     }
@@ -111,10 +109,8 @@ class StorageLockNotifier extends StateNotifier<StorageLockState> {
 
   static const _lockedKey = 'firecloud_locked_bytes';
   static const _isLockedKey = 'firecloud_is_locked';
-  static const _usedStorageKey = 'firecloud_used_storage';
 
-  StorageLockNotifier(this._prefs)
-    : super(const StorageLockState(isLoading: true)) {
+  StorageLockNotifier(this._prefs) : super(const StorageLockState(isLoading: true)) {
     _initialize();
   }
 
@@ -125,17 +121,8 @@ class StorageLockNotifier extends StateNotifier<StorageLockState> {
     await _garbageDir!.create(recursive: true);
 
     // Load saved state
-    var lockedBytes = _prefs.getInt(_lockedKey) ?? 0;
-    var isLocked = _prefs.getBool(_isLockedKey) ?? false;
-    final usedBytes = _prefs.getInt(_usedStorageKey) ?? 0;
-
-    // Normalize inconsistent persisted lock state.
-    if (!isLocked || lockedBytes <= 0) {
-      lockedBytes = 0;
-      isLocked = false;
-      await _prefs.remove(_lockedKey);
-      await _prefs.setBool(_isLockedKey, false);
-    }
+    final lockedBytes = _prefs.getInt(_lockedKey) ?? 0;
+    final isLocked = _prefs.getBool(_isLockedKey) ?? false;
 
     // Calculate garbage size
     final garbageBytes = await _calculateGarbageSize();
@@ -147,7 +134,7 @@ class StorageLockNotifier extends StateNotifier<StorageLockState> {
       lockedBytes: lockedBytes,
       isLocked: isLocked,
       garbageBytes: garbageBytes,
-      usedBytes: usedBytes < 0 ? 0 : usedBytes,
+      usedBytes: 0,
       isLoading: false,
     );
   }
@@ -192,14 +179,11 @@ class StorageLockNotifier extends StateNotifier<StorageLockState> {
   /// Creates garbage files to reserve the space.
   Future<bool> lockStorage(int bytes) async {
     if (bytes > state.availableToLock) {
-      state = state.copyWith(
-        error: 'Not enough free space to lock ${_formatBytes(bytes)}',
-      );
+      state = state.copyWith(error: 'Not enough free space to lock ${_formatBytes(bytes)}');
       return false;
     }
 
-    if (bytes < 1024 * 1024 * 100) {
-      // Minimum 100MB
+    if (bytes < 1024 * 1024 * 100) { // Minimum 100MB
       state = state.copyWith(error: 'Minimum lock amount is 100 MB');
       return false;
     }
@@ -237,8 +221,7 @@ class StorageLockNotifier extends StateNotifier<StorageLockState> {
   Future<bool> unlockStorage() async {
     if (state.usedBytes > 0) {
       state = state.copyWith(
-        error:
-            'Cannot unlock: ${_formatBytes(state.usedBytes)} of real data stored. '
+        error: 'Cannot unlock: ${_formatBytes(state.usedBytes)} of real data stored. '
             'Transfer data to other nodes first.',
       );
       return false;
@@ -316,7 +299,9 @@ class StorageLockNotifier extends StateNotifier<StorageLockState> {
       fileIndex++;
 
       // Update progress
-      state = state.copyWith(garbageBytes: written);
+      state = state.copyWith(
+        garbageBytes: written,
+      );
       await Future<void>.delayed(Duration.zero);
     }
   }
@@ -355,13 +340,15 @@ class StorageLockNotifier extends StateNotifier<StorageLockState> {
 
     for (final file in files) {
       if (released >= bytesNeeded) break;
-
+      
       final size = await file.length();
       await file.delete();
       released += size;
     }
 
-    state = state.copyWith(garbageBytes: state.garbageBytes - released);
+    state = state.copyWith(
+      garbageBytes: state.garbageBytes - released,
+    );
 
     return released;
   }
@@ -387,19 +374,16 @@ class StorageLockNotifier extends StateNotifier<StorageLockState> {
   String _formatBytes(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
-    }
+    if (bytes < 1024 * 1024 * 1024) return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
     return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
   }
 }
 
 /// Provider for storage lock state.
-final storageLockProvider =
-    StateNotifierProvider<StorageLockNotifier, StorageLockState>((ref) {
-      final prefs = ref.watch(sharedPreferencesProvider);
-      return StorageLockNotifier(prefs);
-    });
+final storageLockProvider = StateNotifierProvider<StorageLockNotifier, StorageLockState>((ref) {
+  final prefs = ref.watch(sharedPreferencesProvider);
+  return StorageLockNotifier(prefs);
+});
 
 /// Provider for SharedPreferences.
 final sharedPreferencesProvider = Provider<SharedPreferences>((ref) {

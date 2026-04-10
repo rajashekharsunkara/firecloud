@@ -3,41 +3,10 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../node/node_role.dart';
-import '../p2p/signaling_client.dart';
 import '../providers/node_provider.dart';
 import '../providers/auth_provider.dart' show AuthState, authProvider;
-import '../providers/storage_lock_provider.dart'
-    show StorageLockState, storageLockProvider;
+import '../providers/storage_lock_provider.dart' show StorageLockState, storageLockProvider;
 import '../main.dart' show themeModeProvider, sharedPreferencesProvider;
-
-ButtonStyle _settingsFilledButtonStyle(ThemeData theme) {
-  final isDark = theme.brightness == Brightness.dark;
-  return FilledButton.styleFrom(
-    backgroundColor: isDark
-        ? theme.colorScheme.secondary
-        : theme.colorScheme.primary,
-    foregroundColor: isDark
-        ? theme.colorScheme.onSecondary
-        : theme.colorScheme.onPrimary,
-    disabledBackgroundColor: theme.colorScheme.surfaceContainerHighest,
-    disabledForegroundColor: theme.colorScheme.onSurface.withValues(
-      alpha: 0.45,
-    ),
-  );
-}
-
-ButtonStyle _settingsTonalButtonStyle(ThemeData theme) {
-  return FilledButton.styleFrom(
-    backgroundColor: theme.colorScheme.surfaceContainerHighest,
-    foregroundColor: theme.colorScheme.onSurface,
-    disabledBackgroundColor: theme.colorScheme.surfaceContainerHighest
-        .withValues(alpha: 0.55),
-    disabledForegroundColor: theme.colorScheme.onSurface.withValues(
-      alpha: 0.45,
-    ),
-    side: BorderSide(color: theme.colorScheme.outline.withValues(alpha: 0.25)),
-  );
-}
 
 /// Node settings screen - configure role, storage quota, and auth.
 class NodeSettingsScreen extends ConsumerStatefulWidget {
@@ -51,7 +20,6 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
   bool _isChangingRole = false;
   double _selectedQuotaGB = 10;
   bool _isLockOperationRunning = false;
-  bool _isUpdatingInternetSettings = false;
 
   void _syncStorageLockUsage(NodeConfigState config) {
     ref
@@ -66,9 +34,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
       await ref.read(nodeConfigProvider.notifier).setRole(role);
       if (!mounted) return;
       if (role == NodeRole.storageProvider) {
-        await ref
-            .read(nodeConfigProvider.notifier)
-            .setStorageQuota(_selectedQuotaGB.toInt());
+        await ref.read(nodeConfigProvider.notifier).setStorageQuota(_selectedQuotaGB.toInt());
         if (!mounted) return;
       }
       _showSuccess('Role updated');
@@ -78,133 +44,6 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
       if (mounted) {
         setState(() => _isChangingRole = false);
       }
-    }
-  }
-
-  bool _isValidHttpUrl(String value) {
-    final parsed = Uri.tryParse(value.trim());
-    return parsed != null &&
-        parsed.hasScheme &&
-        parsed.host.isNotEmpty &&
-        (parsed.scheme == 'http' || parsed.scheme == 'https');
-  }
-
-  Future<String?> _showUrlEditDialog({
-    required String title,
-    required String initialValue,
-    required String hintText,
-    bool allowEmpty = false,
-  }) async {
-    final controller = TextEditingController(text: initialValue);
-    String? errorText;
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) {
-        final theme = Theme.of(context);
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return AlertDialog(
-              backgroundColor: theme.colorScheme.surface,
-              title: Text(title),
-              content: TextField(
-                controller: controller,
-                decoration: InputDecoration(
-                  hintText: hintText,
-                  errorText: errorText,
-                ),
-                keyboardType: TextInputType.url,
-                textInputAction: TextInputAction.done,
-                minLines: 1,
-                maxLines: 2,
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('CANCEL'),
-                ),
-                FilledButton(
-                  style: _settingsFilledButtonStyle(theme),
-                  onPressed: () {
-                    final value = controller.text.trim();
-                    if (!allowEmpty && value.isEmpty) {
-                      setModalState(() => errorText = 'Value cannot be empty');
-                      return;
-                    }
-                    if (value.isNotEmpty && !_isValidHttpUrl(value)) {
-                      setModalState(
-                        () =>
-                            errorText = 'Enter a valid http:// or https:// URL',
-                      );
-                      return;
-                    }
-                    Navigator.of(context).pop(value);
-                  },
-                  child: const Text('SAVE'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-    controller.dispose();
-    return result;
-  }
-
-  Future<void> _editSignalingServerUrl(NodeConfigState config) async {
-    if (_isUpdatingInternetSettings) return;
-    final value = await _showUrlEditDialog(
-      title: 'Signaling Server URL',
-      initialValue: config.signalingServerUrl,
-      hintText: 'https://your-signaling-server.example',
-      allowEmpty: false,
-    );
-    if (!mounted || value == null || value == config.signalingServerUrl) return;
-    setState(() => _isUpdatingInternetSettings = true);
-    try {
-      await ref.read(nodeConfigProvider.notifier).setSignalingServerUrl(value);
-      _showSuccess('Signaling server updated');
-    } catch (e) {
-      _showError('Failed to update signaling server: $e');
-    } finally {
-      if (mounted) setState(() => _isUpdatingInternetSettings = false);
-    }
-  }
-
-  Future<void> _editRelayBaseUrl(NodeConfigState config) async {
-    if (_isUpdatingInternetSettings) return;
-    final value = await _showUrlEditDialog(
-      title: 'Relay Base URL',
-      initialValue: config.relayBaseUrl,
-      hintText: 'https://your-relay-server.example (optional)',
-      allowEmpty: true,
-    );
-    if (!mounted || value == null || value == config.relayBaseUrl) return;
-    setState(() => _isUpdatingInternetSettings = true);
-    try {
-      await ref.read(nodeConfigProvider.notifier).setRelayBaseUrl(value);
-      _showSuccess(
-        value.isEmpty ? 'Relay URL cleared' : 'Relay base URL updated',
-      );
-    } catch (e) {
-      _showError('Failed to update relay URL: $e');
-    } finally {
-      if (mounted) setState(() => _isUpdatingInternetSettings = false);
-    }
-  }
-
-  Future<void> _resetInternetDiscoveryDefaults() async {
-    if (_isUpdatingInternetSettings) return;
-    setState(() => _isUpdatingInternetSettings = true);
-    try {
-      await ref
-          .read(nodeConfigProvider.notifier)
-          .resetInternetDiscoveryDefaults();
-      _showSuccess('Internet discovery defaults restored');
-    } catch (e) {
-      _showError('Failed to reset internet discovery settings: $e');
-    } finally {
-      if (mounted) setState(() => _isUpdatingInternetSettings = false);
     }
   }
 
@@ -222,7 +61,10 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
   void _showSuccess(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+      ),
     );
   }
 
@@ -322,9 +164,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                       const Divider(height: 24),
                       _InfoRow(
                         label: 'Background Service',
-                        value: config.isBackgroundServiceRunning
-                            ? 'Active'
-                            : 'Inactive',
+                        value: config.isBackgroundServiceRunning ? 'Active' : 'Inactive',
                         valueColor: config.isBackgroundServiceRunning
                             ? theme.colorScheme.primary
                             : theme.colorScheme.error,
@@ -363,79 +203,63 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                     Text(
                       'Reserve storage space for the network',
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(
-                          alpha: 0.6,
-                        ),
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
                       ),
                     ),
                     const SizedBox(height: 16),
-                    _StorageLockCard(
-                      state: storageLock,
-                      selectedQuotaGB: _selectedQuotaGB,
-                      isOperationRunning: _isLockOperationRunning,
-                      onQuotaChanged: (v) =>
-                          setState(() => _selectedQuotaGB = v),
-                      onLock: () async {
-                        if (_isLockOperationRunning) return;
-                        setState(() => _isLockOperationRunning = true);
-                        try {
-                          final ok = await ref
-                              .read(storageLockProvider.notifier)
-                              .lockStorage(
-                                (_selectedQuotaGB * 1024 * 1024 * 1024).toInt(),
+                      _StorageLockCard(
+                        state: storageLock,
+                        selectedQuotaGB: _selectedQuotaGB,
+                        isOperationRunning: _isLockOperationRunning,
+                        onQuotaChanged: (v) => setState(() => _selectedQuotaGB = v),
+                        onLock: () async {
+                          if (_isLockOperationRunning) return;
+                          setState(() => _isLockOperationRunning = true);
+                          try {
+                            final ok = await ref
+                                .read(storageLockProvider.notifier)
+                                .lockStorage((_selectedQuotaGB * 1024 * 1024 * 1024).toInt());
+                            if (ok) {
+                              await ref
+                                  .read(nodeConfigProvider.notifier)
+                                  .setStorageQuota(_selectedQuotaGB.toInt());
+                              _showSuccess(
+                                'Storage locked at ${_selectedQuotaGB.toStringAsFixed(0)} GB',
                               );
-                          if (ok) {
-                            await ref
-                                .read(nodeConfigProvider.notifier)
-                                .setStorageQuota(_selectedQuotaGB.toInt());
-                            _showSuccess(
-                              'Storage locked at ${_selectedQuotaGB.toStringAsFixed(0)} GB',
-                            );
-                          } else {
-                            final error = ref.read(storageLockProvider).error;
-                            if (error != null && mounted) _showError(error);
+                            } else {
+                              final error = ref.read(storageLockProvider).error;
+                              if (error != null && mounted) _showError(error);
+                            }
+                          } catch (e) {
+                            if (mounted) _showError('Failed to lock storage: $e');
+                          } finally {
+                            if (mounted) setState(() => _isLockOperationRunning = false);
                           }
-                        } catch (e) {
-                          if (mounted) _showError('Failed to lock storage: $e');
-                        } finally {
-                          if (mounted) {
-                            setState(() => _isLockOperationRunning = false);
+                        },
+                        onUnlock: () async {
+                          if (_isLockOperationRunning) return;
+                          setState(() => _isLockOperationRunning = true);
+                          try {
+                            final ok = await ref.read(storageLockProvider.notifier).unlockStorage();
+                            if (ok) {
+                              await ref.read(nodeConfigProvider.notifier).setStorageQuota(0);
+                              _showSuccess('Storage unlocked');
+                            } else {
+                              final error = ref.read(storageLockProvider).error;
+                              if (error != null && mounted) _showError(error);
+                            }
+                          } catch (e) {
+                            if (mounted) _showError('Failed to unlock storage: $e');
+                          } finally {
+                            if (mounted) setState(() => _isLockOperationRunning = false);
                           }
-                        }
-                      },
-                      onUnlock: () async {
-                        if (_isLockOperationRunning) return;
-                        setState(() => _isLockOperationRunning = true);
-                        try {
-                          final ok = await ref
-                              .read(storageLockProvider.notifier)
-                              .unlockStorage();
-                          if (ok) {
-                            await ref
-                                .read(nodeConfigProvider.notifier)
-                                .setStorageQuota(0);
-                            _showSuccess('Storage unlocked');
-                          } else {
-                            final error = ref.read(storageLockProvider).error;
-                            if (error != null && mounted) _showError(error);
-                          }
-                        } catch (e) {
-                          if (mounted) {
-                            _showError('Failed to unlock storage: $e');
-                          }
-                        } finally {
-                          if (mounted) {
-                            setState(() => _isLockOperationRunning = false);
-                          }
-                        }
-                      },
-                    ).animate().fadeIn(delay: 700.ms).slideY(begin: 0.1),
+                        },
+                      ).animate().fadeIn(delay: 700.ms).slideY(begin: 0.1),
                     const SizedBox(height: 24),
                   ],
-
+                  
                   // Background Mode Section (for providers)
-                  if (config.role == NodeRole.storageProvider &&
-                      config.storageQuotaGB > 0) ...[
+                  if (config.role == NodeRole.storageProvider && config.storageQuotaGB > 0) ...[
                     _SectionHeader(
                       title: 'Background Mode',
                       icon: Icons.sync_outlined,
@@ -444,9 +268,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                     Text(
                       'Keep running when app is closed to serve network requests',
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(
-                          alpha: 0.6,
-                        ),
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -462,14 +284,13 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                                   Row(
                                     children: [
                                       Icon(
-                                        config.isBackgroundServiceRunning
-                                            ? Icons.sync
+                                        config.isBackgroundServiceRunning 
+                                            ? Icons.sync 
                                             : Icons.sync_disabled,
                                         size: 20,
                                         color: config.isBackgroundServiceRunning
                                             ? theme.colorScheme.primary
-                                            : theme.colorScheme.onSurface
-                                                  .withValues(alpha: 0.5),
+                                            : theme.colorScheme.onSurface.withValues(alpha: 0.5),
                                       ),
                                       const SizedBox(width: 12),
                                       Text(
@@ -484,8 +305,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                                         ? 'Node stays online when app is minimized'
                                         : 'Node stops when app is closed',
                                     style: theme.textTheme.bodySmall?.copyWith(
-                                      color: theme.colorScheme.onSurface
-                                          .withValues(alpha: 0.5),
+                                      color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
                                     ),
                                   ),
                                 ],
@@ -494,10 +314,20 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                             Switch(
                               value: config.backgroundModeEnabled,
                               onChanged: (value) {
-                                ref
-                                    .read(nodeConfigProvider.notifier)
+                                ref.read(nodeConfigProvider.notifier)
                                     .setBackgroundModeEnabled(value);
                               },
+                              activeTrackColor: theme.colorScheme.primary,
+                              activeThumbColor: Colors.white,
+                              inactiveTrackColor: isDarkMode 
+                                  ? Colors.grey[700] 
+                                  : Colors.grey[300],
+                              inactiveThumbColor: isDarkMode 
+                                  ? Colors.grey[400] 
+                                  : Colors.grey[600],
+                              trackOutlineColor: WidgetStatePropertyAll(
+                                isDarkMode ? Colors.grey[600] : Colors.grey[400],
+                              ),
                             ),
                           ],
                         ),
@@ -505,105 +335,6 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                     ).animate().fadeIn(delay: 800.ms).slideY(begin: 0.1),
                     const SizedBox(height: 24),
                   ],
-
-                  _SectionHeader(
-                    title: 'Internet Discovery',
-                    icon: Icons.public_outlined,
-                  ).animate().fadeIn(delay: 820.ms).slideX(begin: -0.1),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Configure signaling + relay endpoints for cross-network peers (Google sign-in required)',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  _InfoCard(
-                    children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(
-                            Icons.cloud_sync_outlined,
-                            size: 18,
-                            color: theme.colorScheme.primary,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              config.signalingServerUrl,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                fontFamily: 'monospace',
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(
-                            Icons.swap_calls_outlined,
-                            size: 18,
-                            color: theme.colorScheme.primary,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              config.relayBaseUrl.isEmpty
-                                  ? '(disabled)'
-                                  : config.relayBaseUrl,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                fontFamily: 'monospace',
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 14),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          FilledButton.tonal(
-                            style: _settingsTonalButtonStyle(theme),
-                            onPressed: _isUpdatingInternetSettings
-                                ? null
-                                : () => _editSignalingServerUrl(config),
-                            child: const Text('Edit Signaling'),
-                          ),
-                          FilledButton.tonal(
-                            style: _settingsTonalButtonStyle(theme),
-                            onPressed: _isUpdatingInternetSettings
-                                ? null
-                                : () => _editRelayBaseUrl(config),
-                            child: const Text('Edit Relay'),
-                          ),
-                          TextButton(
-                            onPressed: _isUpdatingInternetSettings
-                                ? null
-                                : _resetInternetDiscoveryDefaults,
-                            child: const Text('Reset defaults'),
-                          ),
-                        ],
-                      ),
-                      if (config.signalingServerUrl ==
-                          SignalingClient.defaultServerUrl) ...[
-                        const SizedBox(height: 12),
-                        Text(
-                          'Default URL is a placeholder. Set your deployed signaling server for normal internet discovery.',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurface.withValues(
-                              alpha: 0.6,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ).animate().fadeIn(delay: 860.ms).slideY(begin: 0.1),
-                  const SizedBox(height: 24),
-
                   _SectionHeader(
                     title: 'Appearance',
                     icon: Icons.palette_outlined,
@@ -619,9 +350,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                               Icon(
                                 isDarkMode ? Icons.dark_mode : Icons.light_mode,
                                 size: 20,
-                                color: theme.colorScheme.onSurface.withValues(
-                                  alpha: 0.7,
-                                ),
+                                color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
                               ),
                               const SizedBox(width: 12),
                               Text(
@@ -633,12 +362,20 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                           Switch(
                             value: isDarkMode,
                             onChanged: (value) {
-                              ref.read(themeModeProvider.notifier).state =
-                                  value;
-                              ref
-                                  .read(sharedPreferencesProvider)
-                                  .setBool('dark_mode', value);
+                              ref.read(themeModeProvider.notifier).state = value;
+                              ref.read(sharedPreferencesProvider).setBool('dark_mode', value);
                             },
+                            activeTrackColor: theme.colorScheme.primary,
+                            activeThumbColor: Colors.white,
+                            inactiveTrackColor: isDarkMode 
+                                ? Colors.grey[700] 
+                                : Colors.grey[300],
+                            inactiveThumbColor: isDarkMode 
+                                ? Colors.grey[400] 
+                                : Colors.grey[600],
+                            trackOutlineColor: WidgetStatePropertyAll(
+                              isDarkMode ? Colors.grey[600] : Colors.grey[400],
+                            ),
                           ),
                         ],
                       ),
@@ -652,10 +389,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                     icon: Icons.info_outline,
                   ).animate().fadeIn(delay: 1000.ms).slideX(begin: -0.1),
                   const SizedBox(height: 12),
-                  _AboutCard()
-                      .animate()
-                      .fadeIn(delay: 1100.ms)
-                      .slideY(begin: 0.1),
+                  _AboutCard().animate().fadeIn(delay: 1100.ms).slideY(begin: 0.1),
                 ]),
               ),
               loading: () => const SliverFillRemaining(
@@ -666,16 +400,11 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(
-                        Icons.error_outline,
-                        size: 48,
-                        color: theme.colorScheme.error,
-                      ),
+                      Icon(Icons.error_outline, size: 48, color: theme.colorScheme.error),
                       const SizedBox(height: 16),
                       Text('Error: $error'),
                       const SizedBox(height: 16),
                       FilledButton.tonal(
-                        style: _settingsTonalButtonStyle(theme),
                         onPressed: () => ref.invalidate(nodeConfigProvider),
                         child: const Text('Retry'),
                       ),
@@ -702,7 +431,11 @@ class _SectionHeader extends StatelessWidget {
     final theme = Theme.of(context);
     return Row(
       children: [
-        Icon(icon, size: 18, color: theme.colorScheme.primary),
+        Icon(
+          icon,
+          size: 18,
+          color: theme.colorScheme.primary,
+        ),
         const SizedBox(width: 8),
         Text(
           title.toUpperCase(),
@@ -837,9 +570,7 @@ class _AccountCard extends StatelessWidget {
                       Text(
                         authState.email ?? '',
                         style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurface.withValues(
-                            alpha: 0.6,
-                          ),
+                          color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
                         ),
                       ),
                     ],
@@ -874,7 +605,6 @@ class _AccountCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 FilledButton.icon(
-                  style: _settingsFilledButtonStyle(theme),
                   onPressed: authState.isLoading ? null : onSignIn,
                   icon: authState.isLoading
                       ? const SizedBox(
@@ -1003,18 +733,14 @@ class _RoleOption extends StatelessWidget {
                     Text(
                       title,
                       style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: isSelected
-                            ? FontWeight.w600
-                            : FontWeight.w500,
+                        fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
                       ),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       description,
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(
-                          alpha: 0.6,
-                        ),
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
                       ),
                     ),
                   ],
@@ -1056,19 +782,14 @@ class _StorageLockCard extends StatelessWidget {
   String _formatBytes(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
-    }
+    if (bytes < 1024 * 1024 * 1024) return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
     return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final maxGB = (state.availableToLock / (1024 * 1024 * 1024)).clamp(
-      1.0,
-      100.0,
-    );
+    final maxGB = (state.availableToLock / (1024 * 1024 * 1024)).clamp(1.0, 100.0);
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -1124,7 +845,11 @@ class _StorageLockCard extends StatelessWidget {
             // Locked state
             Row(
               children: [
-                Icon(Icons.lock, size: 20, color: theme.colorScheme.primary),
+                Icon(
+                  Icons.lock,
+                  size: 20,
+                  color: theme.colorScheme.primary,
+                ),
                 const SizedBox(width: 8),
                 Text(
                   'Storage Locked',
@@ -1169,15 +894,13 @@ class _StorageLockCard extends StatelessWidget {
             const SizedBox(height: 16),
             SizedBox(
               width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: (state.isLoading || isOperationRunning)
-                    ? null
-                    : onUnlock,
-                icon: (state.isLoading || isOperationRunning)
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                child: OutlinedButton.icon(
+                  onPressed: (state.isLoading || isOperationRunning) ? null : onUnlock,
+                  icon: (state.isLoading || isOperationRunning)
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.lock_open),
                 label: const Text('Unlock Storage'),
@@ -1215,19 +938,15 @@ class _StorageLockCard extends StatelessWidget {
             const SizedBox(height: 16),
             SizedBox(
               width: double.infinity,
-              child: FilledButton.icon(
-                style: _settingsFilledButtonStyle(theme),
-                onPressed:
-                    (state.isLoading ||
-                        isOperationRunning ||
-                        state.recommendedBytes == 0)
-                    ? null
-                    : onLock,
-                icon: (state.isLoading || isOperationRunning)
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                child: FilledButton.icon(
+                  onPressed: (state.isLoading || isOperationRunning || state.recommendedBytes == 0)
+                      ? null
+                      : onLock,
+                  icon: (state.isLoading || isOperationRunning)
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.lock),
                 label: const Text('Lock Storage'),
@@ -1302,9 +1021,7 @@ class _AboutCard extends StatelessWidget {
                     Text(
                       'Version 1.0.0',
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(
-                          alpha: 0.6,
-                        ),
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
                       ),
                     ),
                   ],

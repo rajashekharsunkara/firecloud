@@ -9,8 +9,6 @@ import 'signaling_client.dart';
 
 /// Peer information discovered on the network.
 class PeerInfo {
-  static const Duration onlineWindow = Duration(minutes: 10);
-
   final String deviceId;
   final String publicKey;
   final String ipAddress;
@@ -21,7 +19,6 @@ class PeerInfo {
   final String? publicUrl;
   final List<String> relayUrls;
   final String? natType;
-  final bool hasDirectEndpoint;
 
   PeerInfo({
     required this.deviceId,
@@ -34,24 +31,18 @@ class PeerInfo {
     this.publicUrl,
     this.relayUrls = const [],
     this.natType,
-    this.hasDirectEndpoint = true,
   });
 
   factory PeerInfo.fromJson(Map<String, dynamic> json) {
-    final ipAddress = (json['ip_address'] as String?)?.trim() ?? '';
-    final portRaw = json['port'];
-    final port = portRaw is num
-        ? portRaw.toInt()
-        : int.tryParse(portRaw?.toString() ?? '') ?? 0;
     return PeerInfo(
       deviceId: json['device_id'] as String,
       publicKey: json['public_key'] as String,
-      ipAddress: ipAddress,
-      port: port,
-      role: json['role'] == 'storage_provider'
-          ? NodeRole.storageProvider
+      ipAddress: json['ip_address'] as String,
+      port: json['port'] as int,
+      role: json['role'] == 'storage_provider' 
+          ? NodeRole.storageProvider 
           : NodeRole.consumer,
-      availableStorageBytes: (json['available_storage'] as num?)?.toInt() ?? 0,
+      availableStorageBytes: json['available_storage'] as int? ?? 0,
       lastSeen: DateTime.now(),
       publicUrl: json['public_url'] as String?,
       relayUrls: ((json['relay_urls'] as List?) ?? const [])
@@ -59,9 +50,6 @@ class PeerInfo {
           .where((entry) => entry.isNotEmpty)
           .toList(),
       natType: json['nat_type'] as String?,
-      hasDirectEndpoint:
-          json['has_direct_endpoint'] as bool? ??
-          (ipAddress.isNotEmpty && port > 0),
     );
   }
 
@@ -75,11 +63,10 @@ class PeerInfo {
     if (publicUrl != null) 'public_url': publicUrl,
     if (relayUrls.isNotEmpty) 'relay_urls': relayUrls,
     if (natType != null) 'nat_type': natType,
-    'has_direct_endpoint': hasDirectEndpoint,
   };
 
   bool get isStorageProvider => role == NodeRole.storageProvider;
-  bool get isOnline => DateTime.now().difference(lastSeen) < onlineWindow;
+  bool get isOnline => DateTime.now().difference(lastSeen).inSeconds < 120;
   bool get requiresRelay => natType == 'symmetric' || natType == 'restricted';
 
   List<Uri> endpointCandidates(
@@ -115,9 +102,7 @@ class PeerInfo {
       }
     }
 
-    if (hasDirectEndpoint && ipAddress.isNotEmpty && port > 0) {
-      candidates.add(Uri.parse('http://$ipAddress:$port$normalizedPath'));
-    }
+    candidates.add(Uri.parse('http://$ipAddress:$port$normalizedPath'));
     final seen = <String>{};
     return candidates.where((uri) => seen.add(uri.toString())).toList();
   }
@@ -129,15 +114,13 @@ class PeerDiscovery {
   static const multicastPort = 45454;
   static const serviceType = '_firecloud._tcp.local';
   static const broadcastInterval = Duration(seconds: 5);
-  static const peerTimeout = PeerInfo.onlineWindow;
+  static const peerTimeout = Duration(seconds: 120);
 
   final DeviceIdentity identity;
   final NodeRoleManager roleManager;
   final int nodePort;
   final String? accountId;
   final String signalingServerUrl;
-  final String relayBaseUrl;
-  final AuthTokenProvider? authTokenProvider;
 
   RawDatagramSocket? _socket;
   Timer? _broadcastTimer;
@@ -153,16 +136,14 @@ class PeerDiscovery {
     final merged = <String, PeerInfo>{..._wanPeers, ..._lanPeers};
     return merged.values.toList();
   }
-
-  List<PeerInfo> get storageProviders => peers
-      .where(
-        (p) => p.isStorageProvider && p.isOnline && p.availableStorageBytes > 0,
-      )
-      .toList();
+  List<PeerInfo> get storageProviders => 
+      peers
+          .where((p) => p.isStorageProvider && p.isOnline && p.availableStorageBytes > 0)
+          .toList();
   int get totalAvailableProviderStorageBytes => storageProviders.fold(
-    0,
-    (total, peer) => total + peer.availableStorageBytes,
-  );
+        0,
+        (total, peer) => total + peer.availableStorageBytes,
+      );
 
   PeerDiscovery({
     required this.identity,
@@ -170,8 +151,6 @@ class PeerDiscovery {
     this.nodePort = 4001,
     this.accountId,
     this.signalingServerUrl = SignalingClient.defaultServerUrl,
-    this.relayBaseUrl = SignalingClient.defaultRelayBaseUrl,
-    this.authTokenProvider,
   });
 
   /// Start peer discovery service.
@@ -221,10 +200,7 @@ class PeerDiscovery {
         await Future<void>.delayed(const Duration(milliseconds: 400));
       }
     } catch (e) {
-      developer.log(
-        'PeerDiscovery: Failed to start - $e',
-        name: 'firecloud.peer_discovery',
-      );
+      developer.log('PeerDiscovery: Failed to start - $e', name: 'firecloud.peer_discovery');
     }
 
     await _startSignalingDiscovery();
@@ -244,17 +220,9 @@ class PeerDiscovery {
   }
 
   Future<void> _startSignalingDiscovery() async {
-    if (signalingServerUrl.trim().isEmpty) {
-      developer.log(
-        'PeerDiscovery: signaling disabled (no signaling server configured)',
-        name: 'firecloud.peer_discovery',
-      );
-      return;
-    }
-
     if (accountId == null || accountId!.isEmpty) {
       developer.log(
-        'PeerDiscovery: signaling disabled (sign in required for hardened relay)',
+        'PeerDiscovery: signaling disabled (no account id)',
         name: 'firecloud.peer_discovery',
       );
       return;
@@ -262,17 +230,13 @@ class PeerDiscovery {
 
     _signalingClient = SignalingClient(
       serverUrl: signalingServerUrl,
-      relayBaseUrl: relayBaseUrl,
       identity: identity,
       roleManager: roleManager,
       nodePort: nodePort,
       accountId: accountId,
-      authTokenProvider: authTokenProvider,
     );
 
-    _signalingPeerSubscription = _signalingClient!.peerStream.listen((
-      wanPeers,
-    ) {
+    _signalingPeerSubscription = _signalingClient!.peerStream.listen((wanPeers) {
       _wanPeers
         ..clear()
         ..addEntries(wanPeers.map((peer) => MapEntry(peer.deviceId, peer)));
@@ -318,36 +282,14 @@ class PeerDiscovery {
       await _broadcast();
       await _signalingClient?.updateRegistration();
     } catch (e) {
-      developer.log(
-        'PeerDiscovery: Failed to announce - $e',
-        name: 'firecloud.peer_discovery',
-      );
-    }
-  }
-
-  /// Force an immediate discovery refresh before sensitive operations (e.g., upload).
-  Future<void> refreshNow() async {
-    try {
-      _cleanupOldPeers();
-      _peerStreamController.add(peers);
-      await _sendDiscoveryProbe();
-      await _broadcast();
-      await _signalingClient?.refresh();
-      await Future<void>.delayed(const Duration(milliseconds: 350));
-      _cleanupOldPeers();
-      _peerStreamController.add(peers);
-    } catch (e) {
-      developer.log(
-        'PeerDiscovery: refresh failed - $e',
-        name: 'firecloud.peer_discovery',
-      );
+      developer.log('PeerDiscovery: Failed to announce - $e', name: 'firecloud.peer_discovery');
     }
   }
 
   /// Handle incoming datagram.
   void _handleDatagram(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
-
+    
     final datagram = _socket!.receive();
     if (datagram == null) return;
 
@@ -366,7 +308,7 @@ class PeerDiscovery {
       if (type != 'firecloud_announce') return;
 
       final deviceId = json['device_id'] as String;
-
+      
       // Ignore our own announcements
       if (deviceId == identity.deviceId) return;
 
@@ -376,11 +318,10 @@ class PeerDiscovery {
         publicKey: json['public_key'] as String,
         ipAddress: datagram.address.address,
         port: (json['port'] as num).toInt(),
-        role: json['role'] == 'storage_provider'
-            ? NodeRole.storageProvider
+        role: json['role'] == 'storage_provider' 
+            ? NodeRole.storageProvider 
             : NodeRole.consumer,
-        availableStorageBytes:
-            (json['available_storage'] as num?)?.toInt() ?? 0,
+        availableStorageBytes: (json['available_storage'] as num?)?.toInt() ?? 0,
         lastSeen: DateTime.now(),
       );
 
@@ -395,24 +336,20 @@ class PeerDiscovery {
   /// Remove peers that haven't been seen recently.
   void _cleanupOldPeers() {
     final now = DateTime.now();
-    _lanPeers.removeWhere(
-      (_, peer) => now.difference(peer.lastSeen) > peerTimeout,
-    );
-    _wanPeers.removeWhere(
-      (_, peer) => now.difference(peer.lastSeen) > peerTimeout,
-    );
+    _lanPeers.removeWhere((_, peer) => 
+      now.difference(peer.lastSeen) > peerTimeout);
+    _wanPeers.removeWhere((_, peer) => 
+      now.difference(peer.lastSeen) > peerTimeout);
   }
 
   /// Get a specific peer by device ID.
-  PeerInfo? getPeer(String deviceId) =>
-      _lanPeers[deviceId] ?? _wanPeers[deviceId];
+  PeerInfo? getPeer(String deviceId) => _lanPeers[deviceId] ?? _wanPeers[deviceId];
 
   /// Get best storage providers (sorted by available space).
   List<PeerInfo> getBestStorageProviders({int count = 5}) {
     final providers = storageProviders;
-    providers.sort(
-      (a, b) => b.availableStorageBytes.compareTo(a.availableStorageBytes),
-    );
+    providers.sort((a, b) => 
+      b.availableStorageBytes.compareTo(a.availableStorageBytes));
     return providers.take(count).toList();
   }
 }

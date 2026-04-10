@@ -54,18 +54,7 @@ flutter test
 # Build APK
 BUILD_TYPE="${1:-release}"
 echo "Building $BUILD_TYPE APK..."
-
-BUILD_ARGS=(--$BUILD_TYPE)
-if [[ -n "${FIRECLOUD_SIGNALING_URL:-}" ]]; then
-    BUILD_ARGS+=("--dart-define=FIRECLOUD_SIGNALING_URL=${FIRECLOUD_SIGNALING_URL}")
-    echo "Using FIRECLOUD_SIGNALING_URL=${FIRECLOUD_SIGNALING_URL}"
-fi
-if [[ -n "${FIRECLOUD_RELAY_URL:-}" ]]; then
-    BUILD_ARGS+=("--dart-define=FIRECLOUD_RELAY_URL=${FIRECLOUD_RELAY_URL}")
-    echo "Using FIRECLOUD_RELAY_URL=${FIRECLOUD_RELAY_URL}"
-fi
-
-flutter build apk "${BUILD_ARGS[@]}"
+flutter build apk --$BUILD_TYPE
 
 APK_PATH="$MOBILE_DIR/build/app/outputs/flutter-apk/app-$BUILD_TYPE.apk"
 if [[ -f "$APK_PATH" ]]; then
