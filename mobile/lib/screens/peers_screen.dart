@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,11 +8,62 @@ import '../p2p/peer_discovery.dart';
 import '../providers/node_provider.dart';
 
 /// Peers screen - view discovered nodes on the network.
-class PeersScreen extends ConsumerWidget {
+class PeersScreen extends ConsumerStatefulWidget {
   const PeersScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PeersScreen> createState() => _PeersScreenState();
+}
+
+class _PeersScreenState extends ConsumerState<PeersScreen> {
+  bool _isRefreshing = false;
+
+  Future<void> _refreshPeers() async {
+    if (_isRefreshing) return;
+
+    setState(() {
+      _isRefreshing = true;
+    });
+
+    try {
+      final refresh = ref.read(peerRefreshProvider);
+      await refresh().timeout(const Duration(seconds: 8));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Peer discovery refreshed'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } on TimeoutException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Peer refresh timed out. Check network and retry.'),
+          backgroundColor: Theme.of(context).colorScheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Peer refresh failed: $error'),
+          backgroundColor: Theme.of(context).colorScheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isRefreshing = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final peersAsync = ref.watch(peersProvider);
     final theme = Theme.of(context);
 
@@ -47,8 +100,14 @@ class PeersScreen extends ConsumerWidget {
                       ],
                     ),
                     IconButton(
-                      icon: const Icon(Icons.refresh),
-                      onPressed: () => ref.invalidate(peersProvider),
+                      icon: _isRefreshing
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh),
+                      onPressed: _isRefreshing ? null : _refreshPeers,
                     ),
                   ],
                 ),
@@ -76,7 +135,7 @@ class PeersScreen extends ConsumerWidget {
                     Text('Error: $error'),
                     const SizedBox(height: 16),
                     FilledButton.tonal(
-                      onPressed: () => ref.invalidate(peersProvider),
+                      onPressed: _refreshPeers,
                       child: const Text('Retry'),
                     ),
                   ],
@@ -151,7 +210,7 @@ class PeersScreen extends ConsumerWidget {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    'Peers announce every 30 seconds using mDNS multicast',
+                    'LAN discovery pulses every 5s with relay-assisted refresh bursts',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
                     ),

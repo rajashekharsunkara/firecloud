@@ -320,12 +320,62 @@ class ChunkDistributor {
   final LocalStorage localStorage;
   final PeerDiscovery peerDiscovery;
   final DeviceIdentity identity;
+  final String relayBaseUrl;
+  final String? accountId;
+  final Future<String?> Function()? authTokenProvider;
 
   ChunkDistributor({
     required this.localStorage,
     required this.peerDiscovery,
     required this.identity,
+    required this.relayBaseUrl,
+    this.accountId,
+    this.authTokenProvider,
   });
+
+  String? get _normalizedRelayBaseUrl {
+    final trimmed = relayBaseUrl.trim();
+    if (trimmed.isEmpty) return null;
+    return trimmed.endsWith('/')
+        ? trimmed.substring(0, trimmed.length - 1)
+        : trimmed;
+  }
+
+  bool get _requireRelayReplica {
+    final owner = accountId?.trim();
+    return owner != null && owner.isNotEmpty && _normalizedRelayBaseUrl != null;
+  }
+
+  Uri? _relayChunkUri({required String nodeId, required String hash}) {
+    final base = _normalizedRelayBaseUrl;
+    if (base == null) return null;
+    return Uri.parse('$base/p2p/$nodeId/chunks/$hash');
+  }
+
+  Future<void> _applyRequestHeaders(
+    HttpClientRequest request, {
+    String? fileId,
+    bool binaryPayload = false,
+  }) async {
+    request.headers.set('X-Device-ID', identity.deviceId);
+    if (fileId != null && fileId.isNotEmpty) {
+      request.headers.set('X-File-ID', fileId);
+    }
+    final owner = accountId?.trim();
+    if (owner != null && owner.isNotEmpty) {
+      request.headers.set('X-FireCloud-Account-Id', owner);
+      request.headers.set('X-Account-Id', owner);
+    }
+    if (authTokenProvider != null) {
+      final token = await authTokenProvider!();
+      if (token != null && token.isNotEmpty) {
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      }
+    }
+    if (binaryPayload) {
+      request.headers.set('Content-Type', 'application/octet-stream');
+    }
+  }
 
   /// Distribute chunks to storage providers on the network.
   /// Uses 3-of-5 erasure coding for fault tolerance.
@@ -410,6 +460,29 @@ class ChunkDistributor {
         final remoteNodeIds = uploadResults.whereType<String>().toList();
         nodeIds.addAll(remoteNodeIds);
 
+        if (_normalizedRelayBaseUrl != null) {
+          try {
+            await _storeChunkInRelay(
+              hash: chunk.hash,
+              data: encrypted,
+              fileId: fileId,
+            );
+            if (!nodeIds.contains(identity.deviceId)) {
+              nodeIds.add(identity.deviceId);
+            }
+          } catch (e) {
+            if (_requireRelayReplica) {
+              throw UploadReplicationFailedError(
+                'Upload could not mirror chunk ${chunk.hash} to relay cache: $e',
+              );
+            }
+            developer.log(
+              'Relay chunk mirror failed for ${chunk.hash}: $e',
+              name: 'firecloud.local_storage',
+            );
+          }
+        }
+
       if (!isProviderNode && remoteNodeIds.isEmpty) {
         throw UploadReplicationFailedError(
           'Upload could not reach any storage provider for chunk ${chunk.hash}',
@@ -457,16 +530,30 @@ class ChunkDistributor {
       // Try remote nodes
       if (encrypted == null) {
         for (final nodeId in chunkRef.nodeIds) {
-          if (nodeId == identity.deviceId) continue;
+          if (nodeId == identity.deviceId) {
+            try {
+              encrypted = await _getChunkFromRelay(nodeId: nodeId, hash: chunkRef.hash);
+              if (encrypted != null) break;
+            } catch (_) {
+              // Try other replicas.
+            }
+            continue;
+          }
           
           final peer = peerDiscovery.getPeer(nodeId);
-          if (peer == null || !peer.isOnline) continue;
-
+          if (peer != null && peer.isOnline) {
+            try {
+              encrypted = await _getChunkFromPeer(peer, chunkRef.hash);
+              if (encrypted != null) break;
+            } catch (_) {
+              // Try relay fallback for this node id.
+            }
+          }
           try {
-            encrypted = await _getChunkFromPeer(peer, chunkRef.hash);
+            encrypted = await _getChunkFromRelay(nodeId: nodeId, hash: chunkRef.hash);
             if (encrypted != null) break;
-          } catch (e) {
-            // Try next node
+          } catch (_) {
+            // Try next node id.
           }
         }
       }
@@ -479,6 +566,11 @@ class ChunkDistributor {
 
       // Decrypt and copy to buffer
       final decrypted = ChunkEncryption.decrypt(encrypted, encryptionKey);
+      if (decrypted.length < chunkRef.size) {
+        throw ChunkNotFoundError(
+          'Chunk ${chunkRef.hash} payload is smaller than expected',
+        );
+      }
       buffer.setRange(chunkRef.offset, chunkRef.offset + chunkRef.size, decrypted);
     }
 
@@ -493,8 +585,7 @@ class ChunkDistributor {
       final client = HttpClient();
       try {
         final request = await client.deleteUrl(endpoint);
-        request.headers.set('X-Device-ID', identity.deviceId);
-        request.headers.set('X-File-ID', fileId);
+        await _applyRequestHeaders(request, fileId: fileId);
         final response = await request.close();
         if (response.statusCode == 200 || response.statusCode == 204 || response.statusCode == 404) {
           return;
@@ -507,6 +598,33 @@ class ChunkDistributor {
       }
     }
     throw lastError ?? Exception('Failed to delete chunk from any endpoint');
+  }
+
+  /// Delete relay-cached chunk when no live peer endpoint is available.
+  Future<void> deleteChunkFromRelay({
+    required String nodeId,
+    required String hash,
+    required String fileId,
+  }) async {
+    final endpoint = _relayChunkUri(nodeId: nodeId, hash: hash);
+    if (endpoint == null) {
+      throw Exception('Relay base URL is not configured');
+    }
+
+    final client = HttpClient();
+    try {
+      final request = await client.deleteUrl(endpoint);
+      await _applyRequestHeaders(request, fileId: fileId);
+      final response = await request.close();
+      if (response.statusCode == 200 ||
+          response.statusCode == 204 ||
+          response.statusCode == 404) {
+        return;
+      }
+      throw Exception('Relay delete failed: ${response.statusCode}');
+    } finally {
+      client.close();
+    }
   }
 
   /// Send chunk to peer via HTTP.
@@ -522,9 +640,11 @@ class ChunkDistributor {
       final client = HttpClient();
       try {
         final request = await client.postUrl(endpoint);
-        request.headers.set('Content-Type', 'application/octet-stream');
-        request.headers.set('X-Device-ID', identity.deviceId);
-        request.headers.set('X-File-ID', fileId);
+        await _applyRequestHeaders(
+          request,
+          fileId: fileId,
+          binaryPayload: true,
+        );
         request.add(data);
         final response = await request.close();
         if (response.statusCode == 200 || response.statusCode == 201) {
@@ -546,6 +666,35 @@ class ChunkDistributor {
     throw Exception('Failed to store chunk on any endpoint');
   }
 
+  Future<void> _storeChunkInRelay({
+    required String hash,
+    required Uint8List data,
+    required String fileId,
+  }) async {
+    final endpoint = _relayChunkUri(nodeId: identity.deviceId, hash: hash);
+    if (endpoint == null) {
+      throw Exception('Relay base URL is not configured');
+    }
+
+    final client = HttpClient();
+    try {
+      final request = await client.postUrl(endpoint);
+      await _applyRequestHeaders(
+        request,
+        fileId: fileId,
+        binaryPayload: true,
+      );
+      request.add(data);
+      final response = await request.close();
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        return;
+      }
+      throw Exception('Relay store failed: ${response.statusCode}');
+    } finally {
+      client.close();
+    }
+  }
+
   /// Get chunk from peer via HTTP.
   Future<Uint8List?> _getChunkFromPeer(PeerInfo peer, String hash) async {
     final endpoints = peer.endpointCandidates('/chunks/$hash', preferRelay: true);
@@ -553,7 +702,7 @@ class ChunkDistributor {
       final client = HttpClient();
       try {
         final request = await client.getUrl(endpoint);
-        request.headers.set('X-Device-ID', identity.deviceId);
+        await _applyRequestHeaders(request);
         final response = await request.close();
         if (response.statusCode == 200) {
           final bytes = await response.fold<List<int>>(
@@ -569,6 +718,31 @@ class ChunkDistributor {
       }
     }
     return null;
+  }
+
+  Future<Uint8List?> _getChunkFromRelay({
+    required String nodeId,
+    required String hash,
+  }) async {
+    final endpoint = _relayChunkUri(nodeId: nodeId, hash: hash);
+    if (endpoint == null) return null;
+
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(endpoint);
+      await _applyRequestHeaders(request);
+      final response = await request.close();
+      if (response.statusCode != 200) {
+        return null;
+      }
+      final bytes = await response.fold<List<int>>(
+        [],
+        (prev, chunk) => prev..addAll(chunk),
+      );
+      return Uint8List.fromList(bytes);
+    } finally {
+      client.close();
+    }
   }
 }
 

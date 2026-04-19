@@ -54,7 +54,21 @@ flutter test
 # Build APK
 BUILD_TYPE="${1:-release}"
 echo "Building $BUILD_TYPE APK..."
-flutter build apk --$BUILD_TYPE
+DART_DEFINES=()
+if [[ -n "${FIRECLOUD_SIGNALING_URL:-}" ]]; then
+    DART_DEFINES+=(--dart-define "FIRECLOUD_SIGNALING_URL=${FIRECLOUD_SIGNALING_URL}")
+fi
+if [[ -n "${FIRECLOUD_RELAY_URL:-}" ]]; then
+    DART_DEFINES+=(--dart-define "FIRECLOUD_RELAY_URL=${FIRECLOUD_RELAY_URL}")
+fi
+
+if [[ ${#DART_DEFINES[@]} -gt 0 ]]; then
+    echo "Using WAN endpoints:"
+    [[ -n "${FIRECLOUD_SIGNALING_URL:-}" ]] && echo "  signaling: ${FIRECLOUD_SIGNALING_URL}"
+    [[ -n "${FIRECLOUD_RELAY_URL:-}" ]] && echo "  relay: ${FIRECLOUD_RELAY_URL}"
+fi
+
+flutter build apk --$BUILD_TYPE "${DART_DEFINES[@]}"
 
 APK_PATH="$MOBILE_DIR/build/app/outputs/flutter-apk/app-$BUILD_TYPE.apk"
 if [[ -f "$APK_PATH" ]]; then

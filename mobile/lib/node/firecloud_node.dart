@@ -11,6 +11,7 @@ import '../crypto/encryption.dart';
 import '../storage/chunking.dart';
 import '../storage/local_storage.dart';
 import '../p2p/peer_discovery.dart';
+import '../p2p/signaling_client.dart';
 import 'device_identity.dart';
 import 'node_role.dart';
 
@@ -20,10 +21,13 @@ class FireCloudNode {
   final DeviceIdentity identity;
   final NodeRoleManager roleManager;
   final String? accountId;
+  final String signalingServerUrl;
+  final String relayBaseUrl;
+  final Future<String?> Function()? authTokenProvider;
   late final LocalStorage localStorage;
   late final PeerDiscovery peerDiscovery;
   late final ChunkDistributor chunkDistributor;
-  
+
   HttpServer? _httpServer;
   bool _isRunning = false;
   final int _nodePort;
@@ -32,54 +36,63 @@ class FireCloudNode {
     required this.identity,
     required this.roleManager,
     this.accountId,
+    this.signalingServerUrl = SignalingClient.defaultServerUrl,
+    this.relayBaseUrl = SignalingClient.defaultRelayBaseUrl,
+    this.authTokenProvider,
     int port = 4001,
   }) : _nodePort = port;
 
   bool get isRunning => _isRunning;
   int get port => _nodePort;
-  
+
   /// Initialize the node.
   Future<void> initialize() async {
     localStorage = LocalStorage(roleManager: roleManager);
     await localStorage.initialize();
     await _loadKeys();
     await _enforceConsumerStoragePolicy();
-    
+
     peerDiscovery = PeerDiscovery(
       identity: identity,
       roleManager: roleManager,
       nodePort: _nodePort,
       accountId: accountId,
+      signalingServerUrl: signalingServerUrl,
+      relayBaseUrl: relayBaseUrl,
+      authTokenProvider: authTokenProvider,
     );
-    
+
     chunkDistributor = ChunkDistributor(
       localStorage: localStorage,
       peerDiscovery: peerDiscovery,
       identity: identity,
+      relayBaseUrl: relayBaseUrl,
+      accountId: accountId,
+      authTokenProvider: authTokenProvider,
     );
   }
 
   /// Start the P2P node.
   Future<void> start() async {
     if (_isRunning) return;
-    
+
     // Start peer discovery
     await peerDiscovery.start();
-    
+
     // Start HTTP server for incoming requests
     await _startHttpServer();
-    
+
     _isRunning = true;
   }
 
   /// Stop the P2P node.
   Future<void> stop() async {
     if (!_isRunning) return;
-    
+
     await peerDiscovery.stop();
     await _httpServer?.close();
     _httpServer = null;
-    
+
     _isRunning = false;
   }
 
@@ -99,7 +112,10 @@ class FireCloudNode {
     if (purgeOrphans) {
       final deleted = await localStorage.purgeUnreferencedChunks();
       if (deleted > 0) {
-        developer.log('Purged orphan chunks bytes=$deleted', name: 'firecloud.node');
+        developer.log(
+          'Purged orphan chunks bytes=$deleted',
+          name: 'firecloud.node',
+        );
       }
       return;
     }
@@ -110,7 +126,7 @@ class FireCloudNode {
   /// Start HTTP server to handle peer requests.
   Future<void> _startHttpServer() async {
     _httpServer = await HttpServer.bind(InternetAddress.anyIPv4, _nodePort);
-    
+
     _httpServer!.listen(_handleRequest);
   }
 
@@ -118,13 +134,15 @@ class FireCloudNode {
   void _handleRequest(HttpRequest request) async {
     try {
       final path = request.uri.path;
-      
+
       if (path == '/health') {
         _respondJson(request, {'status': 'ok', 'device_id': identity.deviceId});
       } else if (path == '/info') {
         _respondJson(request, {
           'device_id': identity.deviceId,
-          'role': roleManager.isStorageProvider ? 'storage_provider' : 'consumer',
+          'role': roleManager.isStorageProvider
+              ? 'storage_provider'
+              : 'consumer',
           'available_storage': roleManager.availableStorageBytes,
           'used_storage': roleManager.usedStorageBytes,
         });
@@ -150,7 +168,7 @@ class FireCloudNode {
   /// Handle chunk storage/retrieval requests.
   Future<void> _handleChunkRequest(HttpRequest request) async {
     final hash = request.uri.pathSegments.last;
-    
+
     if (request.method == 'GET') {
       final chunk = await localStorage.getChunk(hash);
       if (chunk != null) {
@@ -169,7 +187,7 @@ class FireCloudNode {
         await request.response.close();
         return;
       }
-      
+
       final bytes = await request.fold<List<int>>([], (p, c) => p..addAll(c));
       try {
         await localStorage.storeChunk(hash, Uint8List.fromList(bytes));
@@ -200,7 +218,10 @@ class FireCloudNode {
         return;
       }
 
-      final remainingRefs = await localStorage.removeChunkReference(hash, fileId);
+      final remainingRefs = await localStorage.removeChunkReference(
+        hash,
+        fileId,
+      );
       if (remainingRefs == 0) {
         await localStorage.deleteChunk(hash);
       }
@@ -226,7 +247,7 @@ class FireCloudNode {
     }).toList();
     _respondJson(request, fileList);
   }
-  
+
   /// Handle manifest sync requests for cross-device file visibility.
   /// GET /manifests?owner_id=ID - returns manifests belonging to specified owner
   Future<void> _handleManifestsRequest(HttpRequest request) async {
@@ -236,16 +257,16 @@ class FireCloudNode {
       await request.response.close();
       return;
     }
-    
+
     final ownerId = request.uri.queryParameters['owner_id'];
     final encrypted = request.uri.queryParameters['encrypted'] == '1';
     final manifests = await localStorage.listManifests();
-    
+
     // Filter by owner if specified
     final filtered = ownerId != null
         ? manifests.where((m) => m.ownerId == ownerId).toList()
         : manifests;
-    
+
     if (!encrypted || ownerId == null || ownerId.isEmpty) {
       // Legacy/plain response
       final manifestList = filtered.map((m) => m.toJson()).toList();
@@ -290,17 +311,21 @@ class FireCloudNode {
     final localProviderCapacity = roleManager.isStorageProvider
         ? roleManager.availableStorageBytes
         : 0;
-    final providerCount = providers.length + (localProviderCapacity > 0 ? 1 : 0);
+    final providerCount =
+        providers.length + (localProviderCapacity > 0 ? 1 : 0);
     if (providerCount == 0) {
       throw P2PStorageUnavailableError(
         'No storage providers with available capacity are currently online',
       );
     }
 
-    final requiredProviderBytes =
-        chunks.fold<int>(0, (total, chunk) => total + chunk.size + 24);
+    final requiredProviderBytes = chunks.fold<int>(
+      0,
+      (total, chunk) => total + chunk.size + 24,
+    );
     final totalAvailable =
-        peerDiscovery.totalAvailableProviderStorageBytes + localProviderCapacity;
+        peerDiscovery.totalAvailableProviderStorageBytes +
+        localProviderCapacity;
     if (totalAvailable < requiredProviderBytes) {
       throw P2PStorageUnavailableError(
         'Not enough provider capacity on network '
@@ -311,9 +336,10 @@ class FireCloudNode {
     // Generate encryption key for this file
     final encryptionKey = ChunkEncryption.generateKey();
     final uploadStartedAt = DateTime.now();
-    
+
     final fileHash = sha256.convert(data).toString();
-    final fileId = '${fileHash.substring(0, 16)}_${DateTime.now().millisecondsSinceEpoch}';
+    final fileId =
+        '${fileHash.substring(0, 16)}_${DateTime.now().millisecondsSinceEpoch}';
 
     // Distribute chunks to network
     final chunkRefs = await chunkDistributor.distributeChunks(
@@ -321,7 +347,7 @@ class FireCloudNode {
       encryptionKey,
       fileId,
     );
-    
+
     final manifest = FileManifest(
       fileId: fileId,
       fileName: fileName,
@@ -331,20 +357,23 @@ class FireCloudNode {
       createdAt: DateTime.now(),
       ownerId: ownerId,
       uploaderDeviceId: identity.deviceId,
+      encryptionKeyB64: base64Encode(encryptionKey),
     );
-    
+
     // Store manifest locally
     await localStorage.storeManifest(manifest);
-    
+
     // Store encryption key (in real app, this would be encrypted with user key)
     await _storeFileKey(fileId, encryptionKey);
 
-    final durationMs = DateTime.now().difference(uploadStartedAt).inMilliseconds;
+    final durationMs = DateTime.now()
+        .difference(uploadStartedAt)
+        .inMilliseconds;
     developer.log(
       'Upload completed file=$fileName size=${data.length} chunks=${chunks.length} duration_ms=$durationMs',
       name: 'firecloud.node',
     );
-    
+
     return manifest;
   }
 
@@ -354,13 +383,36 @@ class FireCloudNode {
     if (manifest == null) {
       throw FileNotFoundException('File not found: $fileId');
     }
-    
+
+    return await downloadManifest(manifest);
+  }
+
+  /// Download a file using a specific manifest (local or remote account cache).
+  Future<Uint8List> downloadManifest(FileManifest manifest) async {
+    final fileId = manifest.fileId;
+
+    // Cache remote manifest locally so follow-up operations are consistent.
+    await localStorage.storeManifest(manifest);
+
     final encryptionKey = await _getFileKey(fileId);
-    if (encryptionKey == null) {
-      throw Exception('Encryption key not found for file');
+    if (encryptionKey != null) {
+      return await chunkDistributor.retrieveChunks(manifest, encryptionKey);
     }
-    
-    return await chunkDistributor.retrieveChunks(manifest, encryptionKey);
+
+    final encodedManifestKey = manifest.encryptionKeyB64;
+    if (encodedManifestKey != null && encodedManifestKey.isNotEmpty) {
+      try {
+        final restoredKey = Uint8List.fromList(base64Decode(encodedManifestKey));
+        if (restoredKey.length == 32) {
+          await _storeFileKey(fileId, restoredKey);
+          return await chunkDistributor.retrieveChunks(manifest, restoredKey);
+        }
+      } catch (_) {
+        // fall through to explicit error.
+      }
+    }
+
+    throw Exception('Encryption key not found for file');
   }
 
   /// Delete a file.
@@ -372,21 +424,42 @@ class FireCloudNode {
     for (final chunk in manifest.chunks) {
       final localOwned = chunk.nodeIds.contains(identity.deviceId);
       if (localOwned) {
-        final remainingRefs = await localStorage.removeChunkReference(chunk.hash, fileId);
+        final remainingRefs = await localStorage.removeChunkReference(
+          chunk.hash,
+          fileId,
+        );
         if (remainingRefs == 0) {
           await localStorage.deleteChunk(chunk.hash);
         }
       }
 
       for (final nodeId in chunk.nodeIds) {
-        if (nodeId == identity.deviceId) continue;
+        if (nodeId == identity.deviceId) {
+          try {
+            await chunkDistributor.deleteChunkFromRelay(
+              nodeId: nodeId,
+              hash: chunk.hash,
+              fileId: fileId,
+            );
+          } catch (_) {
+            // Ignore relay cleanup failure for local identity and continue.
+          }
+          continue;
+        }
         final requestKey = '$nodeId:${chunk.hash}';
         if (!visitedRemotes.add(requestKey)) continue;
 
         final peer = peerDiscovery.getPeer(nodeId);
-        if (peer == null || !peer.isOnline) continue;
         try {
-          await chunkDistributor.deleteChunkFromPeer(peer, chunk.hash, fileId);
+          if (peer != null && peer.isOnline) {
+            await chunkDistributor.deleteChunkFromPeer(peer, chunk.hash, fileId);
+          } else {
+            await chunkDistributor.deleteChunkFromRelay(
+              nodeId: nodeId,
+              hash: chunk.hash,
+              fileId: fileId,
+            );
+          }
         } catch (e) {
           developer.log(
             'Remote chunk delete failed node=$nodeId hash=${chunk.hash}: $e',
@@ -395,7 +468,7 @@ class FireCloudNode {
         }
       }
     }
-    
+
     // Delete manifest and key
     await localStorage.deleteManifest(fileId);
     await _deleteFileKey(fileId);
@@ -417,6 +490,11 @@ class FireCloudNode {
   /// Broadcast current node role/quota to peers immediately.
   Future<void> announcePresence() async {
     await peerDiscovery.announceNow();
+  }
+
+  /// Trigger immediate peer discovery refresh over LAN and signaling relay.
+  Future<void> refreshPeers() async {
+    await peerDiscovery.refreshNow(bursts: 3);
   }
 
   // Key storage helpers (simplified - in production use secure storage)
@@ -448,16 +526,16 @@ class FireCloudNode {
     }
     await _keysFile.writeAsString(jsonEncode(json));
   }
-  
+
   Future<void> _storeFileKey(String fileId, Uint8List key) async {
     _fileKeys[fileId] = key;
     await _persistKeys();
   }
-  
+
   Future<Uint8List?> _getFileKey(String fileId) async {
     return _fileKeys[fileId];
   }
-  
+
   Future<void> _deleteFileKey(String fileId) async {
     _fileKeys.remove(fileId);
     await _persistKeys();

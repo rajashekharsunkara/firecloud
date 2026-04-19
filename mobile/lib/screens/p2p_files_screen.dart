@@ -3,7 +3,9 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../providers/node_provider.dart';
@@ -20,9 +22,109 @@ class FilesScreen extends ConsumerStatefulWidget {
 }
 
 class _FilesScreenState extends ConsumerState<FilesScreen> {
+  final FlutterLocalNotificationsPlugin _notifications =
+      FlutterLocalNotificationsPlugin();
+
   bool _isBusy = false;
   String _busyMessage = '';
   double _progress = 0;
+  bool _notificationsReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeNotifications();
+  }
+
+  Future<void> _initializeNotifications() async {
+    if (!Platform.isAndroid || _notificationsReady) return;
+    const initializationSettings = InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    );
+    await _notifications.initialize(
+        settings: initializationSettings,
+        onDidReceiveNotificationResponse: (response) {
+      final path = response.payload;
+      if (path != null && path.isNotEmpty) {
+        _openLocalPath(path);
+      }
+    });
+    await _notifications
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+    _notificationsReady = true;
+  }
+
+  Future<Directory> _resolveDownloadDirectory() async {
+    final systemDownloads = await getDownloadsDirectory();
+    if (systemDownloads != null) {
+      await systemDownloads.create(recursive: true);
+      return systemDownloads;
+    }
+
+    if (Platform.isAndroid) {
+      final publicDownloads = Directory('/storage/emulated/0/Download/FireCloud');
+      try {
+        await publicDownloads.create(recursive: true);
+        return publicDownloads;
+      } catch (_) {
+        // Fall through to app docs when public Downloads is unavailable.
+      }
+    }
+
+    final appDir = await getApplicationDocumentsDirectory();
+    final localDownloads = Directory('${appDir.path}/downloads');
+    await localDownloads.create(recursive: true);
+    return localDownloads;
+  }
+
+  Future<void> _notifyDownloadComplete(String fileName, String filePath) async {
+    if (!Platform.isAndroid) return;
+    await _initializeNotifications();
+    final details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        'firecloud_downloads',
+        'FireCloud Downloads',
+        channelDescription: 'Notifications for completed FireCloud downloads',
+        importance: Importance.max,
+        priority: Priority.max,
+        icon: '@mipmap/ic_launcher',
+        styleInformation: BigTextStyleInformation(filePath),
+      ),
+    );
+    await _notifications.show(
+      id: DateTime.now().millisecondsSinceEpoch.remainder(100000),
+      title: 'Download complete',
+      body: fileName,
+      notificationDetails: details,
+      payload: filePath,
+    );
+  }
+
+  Future<File> _resolveOutputFile(Directory dir, String originalName) async {
+    final sanitized = originalName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+    final dotIndex = sanitized.lastIndexOf('.');
+    final baseName = dotIndex > 0 ? sanitized.substring(0, dotIndex) : sanitized;
+    final extension = dotIndex > 0 ? sanitized.substring(dotIndex) : '';
+
+    var counter = 0;
+    while (true) {
+      final suffix = counter == 0 ? '' : ' ($counter)';
+      final candidate = File('${dir.path}/$baseName$suffix$extension');
+      if (!await candidate.exists()) {
+        return candidate;
+      }
+      counter += 1;
+    }
+  }
+
+  Future<void> _openLocalPath(String path) async {
+    final result = await OpenFilex.open(path);
+    if (result.type == ResultType.done) return;
+    if (!mounted) return;
+    _showError('Cannot open file: ${result.message}');
+  }
 
   void _setBusy(String message, [double progress = 0]) {
     if (!mounted) return;
@@ -81,22 +183,57 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
     }
   }
 
-  Future<void> _downloadFile(FileManifest file) async {
+  Future<void> _downloadFile(FileManifest file, {bool openAfterDownload = false}) async {
     try {
       _setBusy('Retrieving from peers...');
 
       final bytes = await ref.read(fileActionsProvider.notifier).downloadFile(file.fileId);
 
-      final dir =
-          await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
-      final outputFile = File('${dir.path}/${file.fileName}');
+      final dir = await _resolveDownloadDirectory();
+      final outputFile = await _resolveOutputFile(dir, file.fileName);
       await outputFile.writeAsBytes(bytes);
+      await _notifyDownloadComplete(file.fileName, outputFile.path);
 
       _clearBusy();
-      _showSuccess('Saved to ${outputFile.path}');
+      _showSuccess(
+        'Saved to ${outputFile.path}',
+        action: SnackBarAction(
+          label: 'Open',
+          onPressed: () {
+            _openLocalPath(outputFile.path);
+          },
+        ),
+      );
+      if (openAfterDownload) {
+        await _openLocalPath(outputFile.path);
+      }
     } catch (e) {
       _clearBusy();
       _showError('Download failed: $e');
+    }
+  }
+
+  Future<void> _openFile(FileManifest file) async {
+    final dir = await _resolveDownloadDirectory();
+    final localFile = File('${dir.path}/${file.fileName}');
+    if (!await localFile.exists()) {
+      await _downloadFile(file, openAfterDownload: true);
+      return;
+    }
+    await _openLocalPath(localFile.path);
+  }
+
+  Future<void> _refreshFilesAndPeers() async {
+    try {
+      _setBusy('Refreshing peers and files...');
+      final refresh = ref.read(peerRefreshProvider);
+      await refresh().timeout(const Duration(seconds: 8));
+      ref.invalidate(filesProvider);
+      _clearBusy();
+      _showSuccess('Network refreshed');
+    } catch (e) {
+      _clearBusy();
+      _showError('Refresh failed: $e');
     }
   }
 
@@ -147,10 +284,11 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
     );
   }
 
-  void _showSuccess(String message) {
+  void _showSuccess(String message, {SnackBarAction? action}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
+        action: action,
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -294,7 +432,7 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
                     ),
                     IconButton(
                       icon: const Icon(Icons.refresh),
-                      onPressed: () => ref.invalidate(filesProvider),
+                      onPressed: _isBusy ? null : _refreshFilesAndPeers,
                     ),
                   ],
                 ),
@@ -315,6 +453,7 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
                           file: files[index],
                           index: index,
                           onDownload: () => _downloadFile(files[index]),
+                          onOpen: () => _openFile(files[index]),
                           onDelete: () => _deleteFile(files[index]),
                         ),
                         childCount: files.length,
@@ -502,12 +641,14 @@ class _FileCard extends StatelessWidget {
   final FileManifest file;
   final int index;
   final VoidCallback onDownload;
+  final VoidCallback onOpen;
   final VoidCallback onDelete;
 
   const _FileCard({
     required this.file,
     required this.index,
     required this.onDownload,
+    required this.onOpen,
     required this.onDelete,
   });
 
@@ -645,6 +786,8 @@ class _FileCard extends StatelessWidget {
                   ),
                   onSelected: (value) {
                     switch (value) {
+                      case 'open':
+                        onOpen();
                       case 'download':
                         onDownload();
                       case 'delete':
@@ -652,6 +795,20 @@ class _FileCard extends StatelessWidget {
                     }
                   },
                   itemBuilder: (context) => [
+                    PopupMenuItem(
+                      value: 'open',
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.open_in_new_outlined,
+                            size: 20,
+                            color: theme.colorScheme.onSurface,
+                          ),
+                          const SizedBox(width: 12),
+                          const Text('Open'),
+                        ],
+                      ),
+                    ),
                     PopupMenuItem(
                       value: 'download',
                       child: Row(

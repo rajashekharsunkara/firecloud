@@ -1,6 +1,5 @@
-use crate::config::Settings;
+use crate::config::{load_settings, Settings};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -64,7 +63,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            settings: Settings::default(),
+            settings: load_settings(),
             device_id: None,
             public_key: None,
             is_connected: false,

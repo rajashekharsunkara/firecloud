@@ -9,10 +9,10 @@ Python Core + Flutter Mobile (Android/iOS) + Tauri Desktop (Win/Mac/Linux) with:
 - **Monochrome UI** with smooth animations
 - **Google Authentication** for cross-device file access
 - **Storage Lock** with garbage fill to reserve space
-- **XChaCha20-Poly1305** authenticated encryption
-- **RaptorQ 3-of-5** erasure coding (survive node failures)
+- **Encrypted chunk storage and transfer** (account-scoped relay sync)
+- **Multi-replica chunk distribution** for node-failure resilience
 - **FastCDC** content-defined chunking for deduplication
-- **mDNS peer discovery** for P2P networking (no server needed!)
+- **Hybrid peer discovery** via mDNS (LAN) + signaling relay (WAN)
 - **Device identity** with hardware fingerprinting
 - **Role-based participation**: Storage Provider or Consumer
 
@@ -28,6 +28,8 @@ The mobile app is a **fully standalone P2P node**. Each phone:
 - 📁 **Files**: Upload, download, delete - distributed across network
 - 🌐 **Network**: View connected peers, storage providers
 - ⚙️ **Settings**: Role selection, storage lock, Google sign-in, theme
+- 📲 **Android download notifications** with tap-to-open file actions
+- 🔄 **Burst refresh** for faster peer recovery on unreliable networks
 
 ### Build Android APK
 
@@ -41,11 +43,35 @@ export JAVA_HOME=~/.jdk17  # or your JDK 17 path
 flutter pub get
 
 # Build release APK
-flutter build apk --release
+flutter build apk --release \
+  --dart-define FIRECLOUD_SIGNALING_URL=https://YOUR_SIGNAL_SERVICE_URL \
+  --dart-define FIRECLOUD_RELAY_URL=https://YOUR_SIGNAL_SERVICE_URL/relay
 # Output: build/app/outputs/flutter-apk/app-release.apk (~52MB)
 
 # Install on connected device
 adb install build/app/outputs/flutter-apk/app-release.apk
+```
+
+Production release signing is required for `--release` builds. Configure either:
+
+1. `mobile/android/key.properties` with `storeFile`, `storePassword`, `keyAlias`, `keyPassword`
+2. Environment variables: `FIRECLOUD_UPLOAD_STORE_FILE`, `FIRECLOUD_UPLOAD_STORE_PASSWORD`, `FIRECLOUD_UPLOAD_KEY_ALIAS`, `FIRECLOUD_UPLOAD_KEY_PASSWORD`
+
+For WAN peer discovery over mobile data, all devices must use the same signaling/relay
+service URL and users must be signed in (Firebase ID token is attached to signaling requests).
+
+### Verify signaling service (Cloud Run)
+
+```bash
+# Basic health + DNS verification
+FIRECLOUD_SIGNALING_URL=https://YOUR_SIGNAL_SERVICE_URL \
+  ./scripts/verify-signaling-gcloud.sh
+
+# Optional authenticated API smoke test
+FIRECLOUD_SIGNALING_URL=https://YOUR_SIGNAL_SERVICE_URL \
+FIRECLOUD_TEST_ACCOUNT_ID=your-google-uid \
+FIRECLOUD_TEST_ID_TOKEN=your-firebase-id-token \
+  ./scripts/verify-signaling-gcloud.sh
 ```
 
 ### Build iOS
@@ -113,6 +139,13 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
+Desktop now mirrors the Flutter tab layout (**Files / Network / Settings**) and supports account-scoped relay access:
+
+1. Open **Settings** in desktop app.
+2. Set **Server URL** to your signaling/relay base URL.
+3. Enter the same Google account **UID** and Firebase **ID token** used on mobile.
+4. Save settings, then open **Files** to list and download account files from other nodes.
+
 If host system dependencies are missing on Linux, use containerized build:
 
 ```bash
@@ -155,7 +188,8 @@ Artifacts:
 
 1. **Upload**: File → FastCDC chunks → Encrypt each chunk → Distribute to peers
 2. **Download**: Request chunks from peers → Decrypt → Reassemble file
-3. **Discovery**: Devices announce via mDNS every 30 seconds
+3. **Discovery**: Devices announce via mDNS every 5 seconds
+  - manual refresh triggers relay + LAN burst probes for faster convergence
 4. **Roles**: 
    - **Consumer**: Uses network storage (files distributed to providers)
    - **Storage Provider**: Hosts chunks for others (can lock storage)

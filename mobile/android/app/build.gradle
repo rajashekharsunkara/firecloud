@@ -5,6 +5,26 @@ plugins {
     id "com.google.gms.google-services"
 }
 
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def releaseStoreFile = keystoreProperties["storeFile"] ?: System.getenv("FIRECLOUD_UPLOAD_STORE_FILE")
+def releaseStorePassword = keystoreProperties["storePassword"] ?: System.getenv("FIRECLOUD_UPLOAD_STORE_PASSWORD")
+def releaseKeyAlias = keystoreProperties["keyAlias"] ?: System.getenv("FIRECLOUD_UPLOAD_KEY_ALIAS")
+def releaseKeyPassword = keystoreProperties["keyPassword"] ?: System.getenv("FIRECLOUD_UPLOAD_KEY_PASSWORD")
+def isReleaseTaskRequested = gradle.startParameter.taskNames.any {
+    it.toLowerCase().contains("release")
+}
+
+def hasReleaseSigning =
+        releaseStoreFile != null &&
+        releaseStorePassword != null &&
+        releaseKeyAlias != null &&
+        releaseKeyPassword != null
+
 android {
     namespace = "com.firecloud.app"
     compileSdk = 36
@@ -13,6 +33,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
     }
 
     kotlinOptions {
@@ -27,13 +48,38 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.debug
+            if (!hasReleaseSigning) {
+                if (isReleaseTaskRequested) {
+                    throw new GradleException(
+                            "Release signing config is missing. Set key.properties or FIRECLOUD_UPLOAD_* env vars."
+                    )
+                } else {
+                    signingConfig signingConfigs.debug
+                }
+            } else {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
 }

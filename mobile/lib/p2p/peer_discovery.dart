@@ -39,8 +39,8 @@ class PeerInfo {
       publicKey: json['public_key'] as String,
       ipAddress: json['ip_address'] as String,
       port: json['port'] as int,
-      role: json['role'] == 'storage_provider' 
-          ? NodeRole.storageProvider 
+      role: json['role'] == 'storage_provider'
+          ? NodeRole.storageProvider
           : NodeRole.consumer,
       availableStorageBytes: json['available_storage'] as int? ?? 0,
       lastSeen: DateTime.now(),
@@ -121,6 +121,8 @@ class PeerDiscovery {
   final int nodePort;
   final String? accountId;
   final String signalingServerUrl;
+  final String relayBaseUrl;
+  final Future<String?> Function()? authTokenProvider;
 
   RawDatagramSocket? _socket;
   Timer? _broadcastTimer;
@@ -136,14 +138,16 @@ class PeerDiscovery {
     final merged = <String, PeerInfo>{..._wanPeers, ..._lanPeers};
     return merged.values.toList();
   }
-  List<PeerInfo> get storageProviders => 
-      peers
-          .where((p) => p.isStorageProvider && p.isOnline && p.availableStorageBytes > 0)
-          .toList();
+
+  List<PeerInfo> get storageProviders => peers
+      .where(
+        (p) => p.isStorageProvider && p.isOnline && p.availableStorageBytes > 0,
+      )
+      .toList();
   int get totalAvailableProviderStorageBytes => storageProviders.fold(
-        0,
-        (total, peer) => total + peer.availableStorageBytes,
-      );
+    0,
+    (total, peer) => total + peer.availableStorageBytes,
+  );
 
   PeerDiscovery({
     required this.identity,
@@ -151,6 +155,8 @@ class PeerDiscovery {
     this.nodePort = 4001,
     this.accountId,
     this.signalingServerUrl = SignalingClient.defaultServerUrl,
+    this.relayBaseUrl = SignalingClient.defaultRelayBaseUrl,
+    this.authTokenProvider,
   });
 
   /// Start peer discovery service.
@@ -200,7 +206,10 @@ class PeerDiscovery {
         await Future<void>.delayed(const Duration(milliseconds: 400));
       }
     } catch (e) {
-      developer.log('PeerDiscovery: Failed to start - $e', name: 'firecloud.peer_discovery');
+      developer.log(
+        'PeerDiscovery: Failed to start - $e',
+        name: 'firecloud.peer_discovery',
+      );
     }
 
     await _startSignalingDiscovery();
@@ -230,13 +239,17 @@ class PeerDiscovery {
 
     _signalingClient = SignalingClient(
       serverUrl: signalingServerUrl,
+      relayBaseUrl: relayBaseUrl,
       identity: identity,
       roleManager: roleManager,
       nodePort: nodePort,
       accountId: accountId,
+      authTokenProvider: authTokenProvider,
     );
 
-    _signalingPeerSubscription = _signalingClient!.peerStream.listen((wanPeers) {
+    _signalingPeerSubscription = _signalingClient!.peerStream.listen((
+      wanPeers,
+    ) {
       _wanPeers
         ..clear()
         ..addEntries(wanPeers.map((peer) => MapEntry(peer.deviceId, peer)));
@@ -282,14 +295,39 @@ class PeerDiscovery {
       await _broadcast();
       await _signalingClient?.updateRegistration();
     } catch (e) {
-      developer.log('PeerDiscovery: Failed to announce - $e', name: 'firecloud.peer_discovery');
+      developer.log(
+        'PeerDiscovery: Failed to announce - $e',
+        name: 'firecloud.peer_discovery',
+      );
+    }
+  }
+
+  /// Force an immediate LAN + WAN refresh cycle.
+  Future<void> refreshNow({int bursts = 1}) async {
+    try {
+      final cycleCount = bursts < 1 ? 1 : bursts;
+      for (var i = 0; i < cycleCount; i++) {
+        await _sendDiscoveryProbe();
+        await _broadcast();
+        await _signalingClient?.refresh();
+        if (i < cycleCount - 1) {
+          await Future<void>.delayed(const Duration(milliseconds: 350));
+        }
+      }
+      _cleanupOldPeers();
+      _peerStreamController.add(peers);
+    } catch (e) {
+      developer.log(
+        'PeerDiscovery: Failed to refresh now - $e',
+        name: 'firecloud.peer_discovery',
+      );
     }
   }
 
   /// Handle incoming datagram.
   void _handleDatagram(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
-    
+
     final datagram = _socket!.receive();
     if (datagram == null) return;
 
@@ -308,7 +346,7 @@ class PeerDiscovery {
       if (type != 'firecloud_announce') return;
 
       final deviceId = json['device_id'] as String;
-      
+
       // Ignore our own announcements
       if (deviceId == identity.deviceId) return;
 
@@ -318,10 +356,11 @@ class PeerDiscovery {
         publicKey: json['public_key'] as String,
         ipAddress: datagram.address.address,
         port: (json['port'] as num).toInt(),
-        role: json['role'] == 'storage_provider' 
-            ? NodeRole.storageProvider 
+        role: json['role'] == 'storage_provider'
+            ? NodeRole.storageProvider
             : NodeRole.consumer,
-        availableStorageBytes: (json['available_storage'] as num?)?.toInt() ?? 0,
+        availableStorageBytes:
+            (json['available_storage'] as num?)?.toInt() ?? 0,
         lastSeen: DateTime.now(),
       );
 
@@ -336,20 +375,24 @@ class PeerDiscovery {
   /// Remove peers that haven't been seen recently.
   void _cleanupOldPeers() {
     final now = DateTime.now();
-    _lanPeers.removeWhere((_, peer) => 
-      now.difference(peer.lastSeen) > peerTimeout);
-    _wanPeers.removeWhere((_, peer) => 
-      now.difference(peer.lastSeen) > peerTimeout);
+    _lanPeers.removeWhere(
+      (_, peer) => now.difference(peer.lastSeen) > peerTimeout,
+    );
+    _wanPeers.removeWhere(
+      (_, peer) => now.difference(peer.lastSeen) > peerTimeout,
+    );
   }
 
   /// Get a specific peer by device ID.
-  PeerInfo? getPeer(String deviceId) => _lanPeers[deviceId] ?? _wanPeers[deviceId];
+  PeerInfo? getPeer(String deviceId) =>
+      _lanPeers[deviceId] ?? _wanPeers[deviceId];
 
   /// Get best storage providers (sorted by available space).
   List<PeerInfo> getBestStorageProviders({int count = 5}) {
     final providers = storageProviders;
-    providers.sort((a, b) => 
-      b.availableStorageBytes.compareTo(a.availableStorageBytes));
+    providers.sort(
+      (a, b) => b.availableStorageBytes.compareTo(a.availableStorageBytes),
+    );
     return providers.take(count).toList();
   }
 }

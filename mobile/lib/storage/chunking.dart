@@ -136,6 +136,9 @@ class FileManifest {
   /// Device ID that uploaded this file.
   final String? uploaderDeviceId;
 
+  /// Base64 file key for cross-device account downloads.
+  final String? encryptionKeyB64;
+
   FileManifest({
     required this.fileId,
     required this.fileName,
@@ -145,6 +148,7 @@ class FileManifest {
     required this.createdAt,
     this.ownerId,
     this.uploaderDeviceId,
+    this.encryptionKeyB64,
   });
 
   factory FileManifest.fromJson(Map<String, dynamic> json) {
@@ -159,6 +163,7 @@ class FileManifest {
       createdAt: DateTime.parse(json['created_at'] as String),
       ownerId: json['owner_id'] as String?,
       uploaderDeviceId: json['uploader_device_id'] as String?,
+      encryptionKeyB64: json['encryption_key_b64'] as String?,
     );
   }
 
@@ -171,6 +176,7 @@ class FileManifest {
     'created_at': createdAt.toIso8601String(),
     if (ownerId != null) 'owner_id': ownerId,
     if (uploaderDeviceId != null) 'uploader_device_id': uploaderDeviceId,
+    if (encryptionKeyB64 != null) 'encryption_key_b64': encryptionKeyB64,
   };
   
   /// Create a copy with updated fields.
@@ -183,6 +189,7 @@ class FileManifest {
     DateTime? createdAt,
     String? ownerId,
     String? uploaderDeviceId,
+    String? encryptionKeyB64,
   }) {
     return FileManifest(
       fileId: fileId ?? this.fileId,
@@ -193,6 +200,7 @@ class FileManifest {
       createdAt: createdAt ?? this.createdAt,
       ownerId: ownerId ?? this.ownerId,
       uploaderDeviceId: uploaderDeviceId ?? this.uploaderDeviceId,
+      encryptionKeyB64: encryptionKeyB64 ?? this.encryptionKeyB64,
     );
   }
 }

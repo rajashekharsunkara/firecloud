@@ -31,6 +31,8 @@ fn main() {
             commands::get_pending_appeals,
             commands::get_audit_events,
             commands::verify_audit_chain,
+            commands::get_downloads_directory,
+            commands::open_file_path,
             commands::get_settings,
             commands::save_settings,
         ])

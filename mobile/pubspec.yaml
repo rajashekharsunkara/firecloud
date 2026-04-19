@@ -1,7 +1,7 @@
 name: firecloud_mobile
 description: "FireCloud distributed storage - fully decentralized P2P"
 publish_to: 'none'
-version: 2037.0.0+2037
+version: 2049.0.0+2049
 
 environment:
   sdk: ^3.11.4
@@ -27,6 +27,8 @@ dependencies:
   
   # File operations
   file_picker: any
+  open_filex: any
+  flutter_local_notifications: any
   
   # Cryptography
   crypto: any
