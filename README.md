@@ -132,6 +132,10 @@ cd desktop
 # Install dependencies
 npm install
 
+# Linux native build prerequisites (required for cargo check/build)
+# Ubuntu/Debian: sudo apt-get install pkg-config libssl-dev
+# Fedora/RHEL:   sudo dnf install pkgconf-pkg-config openssl-devel
+
 # Development
 npm run tauri:dev
 
@@ -219,6 +223,7 @@ Artifacts:
 | Android | Flutter 3.24+, JDK 17, Android SDK 35 |
 | iOS | Flutter 3.24+, Xcode 16+, macOS |
 | Desktop | Node.js 18+, Rust 1.70+, Tauri CLI 2.0+ |
+| Desktop (Linux) | pkg-config + OpenSSL development headers (`libssl-dev` / `openssl-devel`) |
 
 ## Files
 

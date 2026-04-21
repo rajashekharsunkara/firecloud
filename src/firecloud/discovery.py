@@ -138,6 +138,7 @@ class SimpleMDNS:
         self.hostname = _get_hostname()
         
         self._discovered: dict[str, DiscoveredNode] = {}
+        self._discovered_lock = Lock()
         self._running = False
         self._stop_event = Event()
         
@@ -239,8 +240,9 @@ class SimpleMDNS:
                 node = self._parse_announcement(data, addr)
                 
                 if node:
-                    is_new = node.device_id not in self._discovered
-                    self._discovered[node.device_id] = node
+                    with self._discovered_lock:
+                        is_new = node.device_id not in self._discovered
+                        self._discovered[node.device_id] = node
                     
                     if is_new and self._on_node_discovered:
                         self._on_node_discovered(node)
@@ -259,11 +261,12 @@ class SimpleMDNS:
         """Check for nodes that haven't announced recently."""
         now = time.time()
         lost = []
-        
-        for device_id, node in self._discovered.items():
-            if now - node.last_seen > MDNS_TTL * 2:
-                node.is_online = False
-                lost.append(node)
+
+        with self._discovered_lock:
+            for _, node in self._discovered.items():
+                if now - node.last_seen > MDNS_TTL * 2:
+                    node.is_online = False
+                    lost.append(node)
         
         for node in lost:
             if self._on_node_lost:
@@ -295,21 +298,24 @@ class SimpleMDNS:
     
     def get_discovered_nodes(self, online_only: bool = True) -> list[DiscoveredNode]:
         """Get list of discovered nodes."""
-        nodes = list(self._discovered.values())
+        with self._discovered_lock:
+            nodes = list(self._discovered.values())
         if online_only:
             nodes = [n for n in nodes if n.is_online]
         return nodes
     
     def get_storage_nodes(self) -> list[DiscoveredNode]:
         """Get discovered storage nodes."""
-        return [
-            n for n in self._discovered.values()
-            if n.is_online and n.node_type == "storage"
-        ]
+        with self._discovered_lock:
+            return [
+                n for n in self._discovered.values()
+                if n.is_online and n.node_type == "storage"
+            ]
     
     def get_node(self, device_id: str) -> DiscoveredNode | None:
         """Get a specific node by ID."""
-        return self._discovered.get(device_id)
+        with self._discovered_lock:
+            return self._discovered.get(device_id)
     
     def on_node_discovered(self, callback: Callable[[DiscoveredNode], None]) -> None:
         """Set callback for when a new node is discovered."""
@@ -455,17 +461,23 @@ class NetworkManager:
     def _merge_bootstrap_peers(self, peers: list[DiscoveredNode]) -> int:
         imported = 0
         now = time.time()
+        newly_discovered: list[DiscoveredNode] = []
         with self._peer_lock:
-            for peer in peers:
-                if peer.device_id == self.device_id:
-                    continue
-                peer.last_seen = now
-                peer.is_online = True
-                is_new = peer.device_id not in self.mdns._discovered
-                self.mdns._discovered[peer.device_id] = peer
-                imported += 1
-                if is_new and self.mdns._on_node_discovered:
-                    self.mdns._on_node_discovered(peer)
+            with self.mdns._discovered_lock:
+                for peer in peers:
+                    if peer.device_id == self.device_id:
+                        continue
+                    peer.last_seen = now
+                    peer.is_online = True
+                    is_new = peer.device_id not in self.mdns._discovered
+                    self.mdns._discovered[peer.device_id] = peer
+                    imported += 1
+                    if is_new:
+                        newly_discovered.append(peer)
+
+        if self.mdns._on_node_discovered:
+            for peer in newly_discovered:
+                self.mdns._on_node_discovered(peer)
         return imported
 
     def refresh_peers(self) -> dict[str, Any]:
@@ -712,8 +724,8 @@ class AsyncNetworkManager:
             while self._running:
                 try:
                     data, addr = await asyncio.wait_for(
-                        loop.run_in_executor(None, lambda: sock.recvfrom(4096)),
-                        timeout=1.0
+                        loop.sock_recvfrom(sock, 4096),
+                        timeout=1.0,
                     )
                     
                     await self._handle_announcement(data, addr)

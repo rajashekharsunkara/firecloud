@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
@@ -101,7 +103,8 @@ _manifest_envelopes: dict[tuple[str, str], dict[str, Any]] = {}
 _rate_limit_hits: dict[str, Deque[float]] = defaultdict(deque)
 _token_cache: dict[str, tuple[str, float]] = {}
 _firebase_initialized = False
-_last_prune_runs = {"peers": 0.0, "chunks": 0.0, "manifests": 0.0}
+_last_prune_runs = {"peers": 0.0, "chunks": 0.0, "manifests": 0.0, "rate_limits": 0.0}
+_background_prune_task: asyncio.Task[None] | None = None
 
 _gcs_bucket: Any | None = None
 if FIRECLOUD_STORAGE_BUCKET:
@@ -123,6 +126,37 @@ elif REQUIRE_DURABLE_STORAGE:
 
 
 app = FastAPI(title="FireCloud Signaling + Relay", version="0.2.0")
+
+
+@app.on_event("startup")
+async def _startup_background_pruner() -> None:
+    global _background_prune_task
+    if _background_prune_task is None or _background_prune_task.done():
+        _background_prune_task = asyncio.create_task(_background_prune_loop())
+
+
+@app.on_event("shutdown")
+async def _shutdown_background_pruner() -> None:
+    global _background_prune_task
+    if _background_prune_task is None:
+        return
+    _background_prune_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await _background_prune_task
+    _background_prune_task = None
+
+
+async def _background_prune_loop() -> None:
+    while True:
+        try:
+            now = time.time()
+            _prune_stale_peers()
+            _prune_stale_relay_chunks()
+            _prune_stale_manifests()
+            _prune_rate_limit_hits(now)
+        except Exception:
+            logger.exception("background prune loop failed")
+        await asyncio.sleep(PRUNE_INTERVAL_SECONDS)
 
 
 class RegisterRequest(BaseModel):
@@ -561,6 +595,21 @@ def _prune_token_cache(now: float) -> None:
             _token_cache[token] = value
 
 
+    def _prune_rate_limit_hits(now: float) -> None:
+        if not _should_prune("rate_limits"):
+            return
+
+        stale_keys: list[str] = []
+        for key, window in _rate_limit_hits.items():
+            while window and now - window[0] > RATE_LIMIT_WINDOW_SECONDS:
+                window.popleft()
+            if not window:
+                stale_keys.append(key)
+
+        for key in stale_keys:
+            _rate_limit_hits.pop(key, None)
+
+
 def _resolve_account_id(
     auth: AuthContext,
     provided_account_id: str | None,
@@ -597,6 +646,8 @@ def _assert_account_access(row: dict[str, Any], auth: AuthContext) -> None:
 
 def _enforce_rate_limit(request: Request, auth: AuthContext, *, write: bool) -> None:
     now = time.time()
+    _prune_rate_limit_hits(now)
+
     identifier = auth.uid or _extract_client_ip(request) or "unknown"
     lane = "write" if write else "read"
     key = f"{lane}:{identifier}"
@@ -779,7 +830,8 @@ def _normalize_manifest_query(query_string: str, auth_uid: str | None) -> str:
 
 def _should_prune(bucket: str) -> bool:
     now = time.time()
-    if now - _last_prune_runs[bucket] < PRUNE_INTERVAL_SECONDS:
+    last_run = _last_prune_runs.get(bucket, 0.0)
+    if now - last_run < PRUNE_INTERVAL_SECONDS:
         return False
     _last_prune_runs[bucket] = now
     return True

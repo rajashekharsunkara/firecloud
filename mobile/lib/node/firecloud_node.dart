@@ -15,6 +15,8 @@ import '../p2p/signaling_client.dart';
 import 'device_identity.dart';
 import 'node_role.dart';
 
+const String _fileKeyStoreSalt = 'firecloud-file-keys-salt-v1';
+
 /// The main FireCloud P2P node running on this device.
 /// This is a fully decentralized node - no central server needed.
 class FireCloudNode {
@@ -501,19 +503,60 @@ class FireCloudNode {
   final Map<String, Uint8List> _fileKeys = {};
   late final File _keysFile;
 
+  Uint8List _deriveKeyStoreKey() {
+    return ChunkEncryption.deriveKey(
+      identity.deviceId,
+      Uint8List.fromList(utf8.encode(_fileKeyStoreSalt)),
+    );
+  }
+
+  void _hydrateKeyMapFromJson(Map<String, dynamic> json) {
+    _fileKeys.clear();
+    for (final entry in json.entries) {
+      final encoded = entry.value;
+      if (encoded is! String) {
+        continue;
+      }
+      try {
+        _fileKeys[entry.key] = Uint8List.fromList(base64Decode(encoded));
+      } catch (_) {
+        // Skip malformed key entries.
+      }
+    }
+  }
+
   Future<void> _loadKeys() async {
     final appDir = await getApplicationDocumentsDirectory();
     final keyDir = Directory('${appDir.path}/firecloud');
     await keyDir.create(recursive: true);
     _keysFile = File('${keyDir.path}/file_keys.json');
     if (!await _keysFile.exists()) return;
+
     try {
       final raw = await _keysFile.readAsString();
-      final json = jsonDecode(raw) as Map<String, dynamic>;
-      for (final entry in json.entries) {
-        final encoded = entry.value as String;
-        _fileKeys[entry.key] = Uint8List.fromList(base64Decode(encoded));
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('invalid key store format');
       }
+
+      final encryptedPayload = decoded['encrypted_payload'];
+      if (encryptedPayload is String && encryptedPayload.isNotEmpty) {
+        final encryptedBytes = Uint8List.fromList(base64Decode(encryptedPayload));
+        final plaintextBytes = ChunkEncryption.decrypt(
+          encryptedBytes,
+          _deriveKeyStoreKey(),
+        );
+        final plaintextJson = jsonDecode(utf8.decode(plaintextBytes));
+        if (plaintextJson is! Map<String, dynamic>) {
+          throw const FormatException('invalid decrypted key store payload');
+        }
+        _hydrateKeyMapFromJson(plaintextJson);
+        return;
+      }
+
+      // Legacy plaintext storage migration path.
+      _hydrateKeyMapFromJson(decoded);
+      await _persistKeys();
     } catch (e) {
       developer.log('Failed loading key store: $e', name: 'firecloud.node');
     }
@@ -524,7 +567,14 @@ class FireCloudNode {
     for (final entry in _fileKeys.entries) {
       json[entry.key] = base64Encode(entry.value);
     }
-    await _keysFile.writeAsString(jsonEncode(json));
+
+    final plaintext = Uint8List.fromList(utf8.encode(jsonEncode(json)));
+    final encrypted = ChunkEncryption.encrypt(plaintext, _deriveKeyStoreKey());
+    final envelope = <String, dynamic>{
+      'version': 1,
+      'encrypted_payload': base64Encode(encrypted),
+    };
+    await _keysFile.writeAsString(jsonEncode(envelope));
   }
 
   Future<void> _storeFileKey(String fileId, Uint8List key) async {

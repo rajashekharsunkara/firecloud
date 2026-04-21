@@ -2,6 +2,7 @@ use crate::config::{save_settings as persist_settings, Settings};
 use crate::state::{AppState, AuditAppeal, AuditEvent, FileInfo, NodeInfo, PeerInfo};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use hmac::{Hmac, Mac};
 use reqwest::{Client, RequestBuilder};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -11,6 +12,10 @@ use std::sync::Mutex;
 use tauri::State;
 
 const MANIFEST_SALT: &str = "firecloud-manifest-salt-v1";
+const ENCRYPTION_FORMAT_VERSION: u8 = 1;
+const NONCE_LEN: usize = 24;
+const HMAC_LEN: usize = 32;
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone, Deserialize)]
 struct RelayManifestListResponse {
@@ -153,13 +158,78 @@ fn derive_account_key(owner_id: &str) -> [u8; 32] {
     key
 }
 
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&a, &b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 fn xor_stream_decrypt(ciphertext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
-    if ciphertext.len() < 24 {
-        return Err("ciphertext too short (missing nonce)".to_string());
+    if ciphertext.is_empty() {
+        return Err("ciphertext is empty".to_string());
     }
 
-    let nonce = &ciphertext[..24];
-    let encrypted = &ciphertext[24..];
+    let nonce: &[u8];
+    let mut encrypted: &[u8];
+
+    if ciphertext[0] == ENCRYPTION_FORMAT_VERSION {
+        let min_length = 1 + NONCE_LEN + HMAC_LEN;
+        if ciphertext.len() < min_length {
+            return Err("ciphertext too short for authenticated payload".to_string());
+        }
+
+        let nonce_start = 1;
+        let nonce_end = nonce_start + NONCE_LEN;
+        let encrypted_end = ciphertext.len() - HMAC_LEN;
+        nonce = &ciphertext[nonce_start..nonce_end];
+        let candidate_encrypted = &ciphertext[nonce_end..encrypted_end];
+        let provided_tag = &ciphertext[encrypted_end..];
+
+        let mut mac = HmacSha256::new_from_slice(key)
+            .map_err(|e| format!("failed to initialize HMAC: {e}"))?;
+        mac.update(&[ENCRYPTION_FORMAT_VERSION]);
+        mac.update(nonce);
+        mac.update(candidate_encrypted);
+        let expected_tag = mac.finalize().into_bytes();
+
+        if !constant_time_eq(provided_tag, expected_tag.as_slice()) {
+            return Err("ciphertext authentication failed".to_string());
+        }
+
+        encrypted = candidate_encrypted;
+    } else {
+        if ciphertext.len() < NONCE_LEN {
+            return Err("ciphertext too short (missing nonce)".to_string());
+        }
+
+        // Backward-compatible format handling:
+        // - Legacy format: [nonce (24)] [ciphertext (N)]
+        // - Transitional format: [nonce (24)] [ciphertext (N)] [hmac (32)]
+        nonce = &ciphertext[..NONCE_LEN];
+        encrypted = &ciphertext[NONCE_LEN..];
+
+        if ciphertext.len() >= NONCE_LEN + HMAC_LEN {
+            let encrypted_end = ciphertext.len() - HMAC_LEN;
+            let candidate_encrypted = &ciphertext[NONCE_LEN..encrypted_end];
+            let provided_tag = &ciphertext[encrypted_end..];
+
+            let mut mac = HmacSha256::new_from_slice(key)
+                .map_err(|e| format!("failed to initialize HMAC: {e}"))?;
+            mac.update(nonce);
+            mac.update(candidate_encrypted);
+            let expected_tag = mac.finalize().into_bytes();
+
+            if constant_time_eq(provided_tag, expected_tag.as_slice()) {
+                encrypted = candidate_encrypted;
+            }
+        }
+    }
+
     let mut plaintext = vec![0u8; encrypted.len()];
     let mut offset = 0usize;
     let mut counter = 0u32;
