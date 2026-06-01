@@ -1,0 +1,103 @@
+services:
+  bootstrap-node:
+    build: .
+    container_name: firecloud-bootstrap
+    ports:
+      - "7474:7474"
+    volumes:
+      - fc-bootstrap-data:/data
+    environment:
+      - FIRECLOUD_PASSPHRASE=${FIRECLOUD_PASSPHRASE}
+      - FIRECLOUD_MAX_STORAGE_GB=${FIRECLOUD_MAX_STORAGE_GB:-10}
+      - FIRECLOUD_DATA_DIR=/data
+    command: ["start", "--passphrase", "${FIRECLOUD_PASSPHRASE}", "--port", "7474", "--storage", "/data"]
+    healthcheck:
+      test: ["CMD", "firecloud", "status", "--passphrase", "${FIRECLOUD_PASSPHRASE}", "--storage", "/data"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - firecloud-net
+
+  storage-node-1:
+    build: .
+    container_name: firecloud-node-1
+    ports:
+      - "7475:7475"
+    volumes:
+      - fc-node1-data:/data
+    environment:
+      - FIRECLOUD_PASSPHRASE=${FIRECLOUD_PASSPHRASE}
+      - FIRECLOUD_BOOTSTRAP=bootstrap-node:7474
+      - FIRECLOUD_MAX_STORAGE_GB=${FIRECLOUD_MAX_STORAGE_GB:-10}
+      - FIRECLOUD_DATA_DIR=/data
+    command: ["start", "--passphrase", "${FIRECLOUD_PASSPHRASE}", "--port", "7475", "--storage", "/data"]
+    healthcheck:
+      test: ["CMD", "firecloud", "status", "--passphrase", "${FIRECLOUD_PASSPHRASE}", "--port", "7475", "--storage", "/data"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      - bootstrap-node
+    networks:
+      - firecloud-net
+
+  storage-node-2:
+    build: .
+    container_name: firecloud-node-2
+    ports:
+      - "7476:7476"
+    volumes:
+      - fc-node2-data:/data
+    environment:
+      - FIRECLOUD_PASSPHRASE=${FIRECLOUD_PASSPHRASE}
+      - FIRECLOUD_BOOTSTRAP=bootstrap-node:7474
+      - FIRECLOUD_MAX_STORAGE_GB=${FIRECLOUD_MAX_STORAGE_GB:-10}
+      - FIRECLOUD_DATA_DIR=/data
+    command: ["start", "--passphrase", "${FIRECLOUD_PASSPHRASE}", "--port", "7476", "--storage", "/data"]
+    healthcheck:
+      test: ["CMD", "firecloud", "status", "--passphrase", "${FIRECLOUD_PASSPHRASE}", "--port", "7476", "--storage", "/data"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      - bootstrap-node
+    networks:
+      - firecloud-net
+
+  storage-node-3:
+    build: .
+    container_name: firecloud-node-3
+    ports:
+      - "7477:7477"
+    volumes:
+      - fc-node3-data:/data
+    environment:
+      - FIRECLOUD_PASSPHRASE=${FIRECLOUD_PASSPHRASE}
+      - FIRECLOUD_BOOTSTRAP=bootstrap-node:7474
+      - FIRECLOUD_MAX_STORAGE_GB=${FIRECLOUD_MAX_STORAGE_GB:-10}
+      - FIRECLOUD_DATA_DIR=/data
+    command: ["start", "--passphrase", "${FIRECLOUD_PASSPHRASE}", "--port", "7477", "--storage", "/data"]
+    healthcheck:
+      test: ["CMD", "firecloud", "status", "--passphrase", "${FIRECLOUD_PASSPHRASE}", "--port", "7477", "--storage", "/data"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      - bootstrap-node
+    networks:
+      - firecloud-net
+
+volumes:
+  fc-bootstrap-data:
+  fc-node1-data:
+  fc-node2-data:
+  fc-node3-data:
+
+networks:
+  firecloud-net:
+    driver: bridge

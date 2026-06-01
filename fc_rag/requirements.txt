@@ -1,0 +1,6 @@
+qdrant-client
+fastembed
+ollama
+pydantic>=2.0
+click
+rich

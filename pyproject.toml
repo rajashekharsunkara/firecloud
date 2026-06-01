@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fire-cloud"
+version = "0.1.0"
+description = "Private, encrypted, distributed storage across your own machines"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Rajashekhar Sunkara" },
+]
+keywords = ["encryption", "distributed", "storage", "p2p", "chunking"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = [
+    "fastcdc>=1.5.0",
+    "pycryptodome>=3.20.0",
+    "zfec>=1.5.0",
+    "zeroconf>=0.80.0",
+    "watchdog>=3.0.0",
+    "click>=8.0.0",
+    "cryptography>=41.0.0",
+    "aiofiles>=23.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.4.0",
+]
+rag = [
+    "qdrant-client>=1.8.0",
+    "fastembed>=0.2.0",
+    "ollama>=0.1.0",
+    "pydantic>=2.0",
+    "rich>=13.0.0",
+]
+mlops = [
+    "pydantic>=2.0",
+    "psutil>=5.9.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "scikit-learn>=1.3.0",
+    "numpy>=1.24.0",
+    "rich>=13.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/rajashekharsunkara/firecloud"
+Repository = "https://github.com/rajashekharsunkara/firecloud"
+Issues = "https://github.com/rajashekharsunkara/firecloud/issues"
+Changelog = "https://github.com/rajashekharsunkara/firecloud/blob/main/CHANGELOG.md"
+
+[project.scripts]
+firecloud = "firecloud.cli:cli"
+fc-rag = "fc_rag.cli:cli"
+fc-ml = "fc_mlops.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["firecloud", "fc_rag", "fc_mlops"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
