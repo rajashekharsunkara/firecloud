@@ -15,10 +15,10 @@ Unlike S3 (vendor lock-in), Syncthing (no erasure coding), or IPFS (public DHT),
 pip install git+https://github.com/rajashekharsunkara/firecloud.git
 
 # with RAG extensions
-pip install "fire-cloud[rag]"
+pip install "firecloud-devnet[rag]"
 
 # with MLOps extensions
-pip install "fire-cloud[mlops]"
+pip install "firecloud-devnet[mlops]"
 ```
 
 ## Quickstart
@@ -75,7 +75,7 @@ FireCloud stores and retrieves encrypted content. The RAG and artifact layers ru
 Index your docs locally and query with a private LLM — no data leaves your machine.
 
 ```bash
-pip install "fire-cloud[rag]"
+pip install "firecloud-devnet[rag]"
 fc-rag index ./docs
 fc-rag query "How does FireCloud handle node departure?"
 ```
@@ -85,7 +85,7 @@ fc-rag query "How does FireCloud handle node departure?"
 Version-track ML models, datasets, and checkpoints using FireCloud as the storage backend.
 
 ```bash
-pip install "fire-cloud[mlops]"
+pip install "firecloud-devnet[mlops]"
 fc-ml save ./model.pt --name resnet --version 1.0.0 --type model --metric accuracy=0.94
 fc-ml simulate-failure
 ```
