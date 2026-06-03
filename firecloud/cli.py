@@ -14,21 +14,15 @@ import click
 
 from firecloud.network import Network
 from firecloud.exceptions import FireCloudError
-
-
 # Default configuration directory
 _DEFAULT_DIR = Path.home() / ".firecloud"
 _KEYSTORE_FILE = "network.key"
 _PID_FILE = "firecloud.pid"
-
-
 def _config_dir() -> Path:
     """Return (and create) the config directory."""
     d = _DEFAULT_DIR
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
 def _load_network(passphrase: str) -> Network:
     """Load the network from the default keystore."""
     keystore = _config_dir() / _KEYSTORE_FILE
@@ -48,25 +42,11 @@ def _human_size(num_bytes: int) -> str:
             return f"{num_bytes:.1f} {unit}"
         num_bytes /= 1024
     return f"{num_bytes:.1f} PB"
-
-
-# ========================================================================
-# CLI Group
-# ========================================================================
-
-
 @click.group()
 @click.version_option(version="0.1.0", prog_name="firecloud")
 def cli():
     """FireCloud — Private, encrypted, distributed storage."""
     pass
-
-
-# ========================================================================
-# init
-# ========================================================================
-
-
 @cli.command()
 @click.option("--join", "join_addr", default=None, help="Join an existing network via peer address (host:port).")
 @click.option("--passphrase", prompt=True, hide_input=True, confirmation_prompt=True, help="Passphrase to protect the network key.")
@@ -98,13 +78,6 @@ def init(join_addr: str | None, passphrase: str):
     click.echo(click.style("✓ Network initialised.", fg="green"))
     click.echo(f"  Network ID : {net.network_id}")
     click.echo(f"  Keystore   : {keystore}")
-
-
-# ========================================================================
-# start
-# ========================================================================
-
-
 @cli.command()
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
 @click.option("--port", default=7474, type=int, help="TCP port to listen on.")
@@ -119,8 +92,6 @@ def start(passphrase: str, port: int, daemon: bool, storage: str | None):
         _start_daemon(net, storage_path, port)
     else:
         _start_foreground(net, storage_path, port)
-
-
 def _start_foreground(net: Network, storage_path: Path, port: int):
     """Run the node in the foreground."""
     from firecloud.node import Node
@@ -149,8 +120,6 @@ def _start_foreground(net: Network, storage_path: Path, port: int):
         click.echo(click.style("✓ Node stopped.", fg="green"))
 
     asyncio.run(_run())
-
-
 def _start_daemon(net: Network, storage_path: Path, port: int):
     """Fork to background and write a PID file (Unix only)."""
     pid_file = _config_dir() / _PID_FILE
@@ -178,13 +147,6 @@ def _start_daemon(net: Network, storage_path: Path, port: int):
     # Child — detach and run
     os.setsid()
     _start_foreground(net, storage_path, port)
-
-
-# ========================================================================
-# stop
-# ========================================================================
-
-
 @cli.command()
 def stop():
     """Stop a running FireCloud daemon."""
@@ -201,13 +163,6 @@ def stop():
         click.echo(click.style(f"Failed to stop PID {pid}: {exc}", fg="red"))
     finally:
         pid_file.unlink(missing_ok=True)
-
-
-# ========================================================================
-# status
-# ========================================================================
-
-
 @cli.command()
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
 @click.option("--port", default=7474, type=int)
@@ -235,13 +190,6 @@ def status(passphrase: str, port: int, storage: str | None):
         click.echo(f"  Storage available: {_human_size(s['storage_available'])}")
 
     asyncio.run(_run())
-
-
-# ========================================================================
-# upload
-# ========================================================================
-
-
 @cli.command()
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
@@ -268,13 +216,6 @@ def upload(path: str, passphrase: str, port: int, storage: str | None):
             await node.stop()
 
     asyncio.run(_run())
-
-
-# ========================================================================
-# download
-# ========================================================================
-
-
 @cli.command()
 @click.argument("file_id")
 @click.argument("output", type=click.Path())
@@ -301,13 +242,6 @@ def download(file_id: str, output: str, passphrase: str, port: int, storage: str
             await node.stop()
 
     asyncio.run(_run())
-
-
-# ========================================================================
-# delete
-# ========================================================================
-
-
 @cli.command("delete")
 @click.argument("file_id")
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
@@ -333,13 +267,7 @@ def delete_file(file_id: str, passphrase: str, port: int, storage: str | None):
             await node.stop()
 
     asyncio.run(_run())
-
-
-# ========================================================================
 # list
-# ========================================================================
-
-
 @cli.command("list")
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
 @click.option("--port", default=7474, type=int)
@@ -378,13 +306,6 @@ def list_files(passphrase: str, port: int, storage: str | None):
             )
 
     asyncio.run(_run())
-
-
-# ========================================================================
-# peers
-# ========================================================================
-
-
 @cli.command()
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
 @click.option("--port", default=7474, type=int)
@@ -417,13 +338,6 @@ def peers(passphrase: str, port: int, storage: str | None):
             )
 
     asyncio.run(_run())
-
-
-# ========================================================================
-# connect
-# ========================================================================
-
-
 @cli.command()
 @click.argument("address")
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
@@ -449,13 +363,6 @@ def connect(address: str, passphrase: str, port: int, storage: str | None):
             await node.stop()
 
     asyncio.run(_run())
-
-
-# ========================================================================
-# remove-node
-# ========================================================================
-
-
 @cli.command("remove-node")
 @click.argument("node_id")
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
@@ -481,13 +388,6 @@ def remove_node(node_id: str, passphrase: str, port: int, storage: str | None):
             await node.stop()
 
     asyncio.run(_run())
-
-
-# ========================================================================
-# sync
-# ========================================================================
-
-
 @cli.command()
 @click.argument("folder", type=click.Path())
 @click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
@@ -529,12 +429,5 @@ def sync(folder: str, passphrase: str, port: int, storage: str | None, daemon: b
         click.echo(click.style("✓ Sync stopped.", fg="green"))
 
     asyncio.run(_run())
-
-
-# ========================================================================
-# Entry point
-# ========================================================================
-
-
 if __name__ == "__main__":
     cli()

@@ -12,13 +12,11 @@ from firecloud.cli import cli
 
 @pytest.fixture
 def runner():
-    """Click test runner."""
     return CliRunner()
 
 
 @pytest.fixture
 def mock_config_dir(tmp_path):
-    """Patch the config directory to a temp location."""
     d = tmp_path / "config"
     d.mkdir()
     with patch("firecloud.cli._DEFAULT_DIR", d):

@@ -110,14 +110,7 @@ def derive_chunk_id(plaintext: bytes, hmac_key: bytes) -> str:
 
 
 def compute_integrity_hash(plaintext: bytes) -> str:
-    """Compute a SHA-256 digest for post-decryption verification.
-
-    Args:
-        plaintext: The chunk data.
-
-    Returns:
-        Hex-encoded SHA-256 digest (64 hex chars).
-    """
+    """SHA-256 digest for post-decryption verification."""
     return hashlib.sha256(plaintext).hexdigest()
 
 
@@ -206,38 +199,17 @@ def decrypt_keystore(encrypted: bytes, passphrase: str) -> bytes:
 
 
 def derive_auth_token(key: bytes) -> bytes:
-    """Derive a 32-byte authentication token from *key* via HKDF-SHA256.
-
-    Args:
-        key: 32-byte network key (input keying material).
-
-    Returns:
-        32-byte derived token.
-    """
+    """32-byte auth token from HKDF-SHA256."""
     return _hkdf_derive(key, info=b"firecloud-auth-token")
 
 
 def derive_encryption_key(key: bytes) -> bytes:
-    """Derive a 32-byte encryption sub-key from *key* via HKDF-SHA256.
-
-    Args:
-        key: 32-byte network key (input keying material).
-
-    Returns:
-        32-byte derived key.
-    """
+    """32-byte encryption sub-key from HKDF-SHA256."""
     return _hkdf_derive(key, info=b"firecloud-encryption-key")
 
 
 def derive_hmac_key(key: bytes) -> bytes:
-    """Derive a 32-byte HMAC sub-key from *key* via HKDF-SHA256.
-
-    Args:
-        key: 32-byte network key (input keying material).
-
-    Returns:
-        32-byte derived key.
-    """
+    """32-byte HMAC sub-key from HKDF-SHA256."""
     return _hkdf_derive(key, info=b"firecloud-hmac-key")
 
 
