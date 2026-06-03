@@ -6,6 +6,7 @@ services:
       - "7474:7474"
     volumes:
       - fc-bootstrap-data:/data
+      - ./test_config/.firecloud:/root/.firecloud:ro,z
     environment:
       - FIRECLOUD_PASSPHRASE=${FIRECLOUD_PASSPHRASE}
       - FIRECLOUD_MAX_STORAGE_GB=${FIRECLOUD_MAX_STORAGE_GB:-10}
@@ -27,6 +28,7 @@ services:
       - "7475:7475"
     volumes:
       - fc-node1-data:/data
+      - ./test_config/.firecloud:/root/.firecloud:ro,z
     environment:
       - FIRECLOUD_PASSPHRASE=${FIRECLOUD_PASSPHRASE}
       - FIRECLOUD_BOOTSTRAP=bootstrap-node:7474
@@ -51,6 +53,7 @@ services:
       - "7476:7476"
     volumes:
       - fc-node2-data:/data
+      - ./test_config/.firecloud:/root/.firecloud:ro,z
     environment:
       - FIRECLOUD_PASSPHRASE=${FIRECLOUD_PASSPHRASE}
       - FIRECLOUD_BOOTSTRAP=bootstrap-node:7474
@@ -75,6 +78,7 @@ services:
       - "7477:7477"
     volumes:
       - fc-node3-data:/data
+      - ./test_config/.firecloud:/root/.firecloud:ro,z
     environment:
       - FIRECLOUD_PASSPHRASE=${FIRECLOUD_PASSPHRASE}
       - FIRECLOUD_BOOTSTRAP=bootstrap-node:7474

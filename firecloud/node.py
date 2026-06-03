@@ -10,6 +10,7 @@ import asyncio
 import builtins
 import json
 import logging
+import os
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -113,6 +114,7 @@ class Node:
 
         # Start client
         self._client = NodeClient(self)
+        self.loop = asyncio.get_running_loop()
 
         # Start mDNS discovery
         if self.enable_discovery:
@@ -138,6 +140,17 @@ class Node:
             f"Node {self.node_id} started on {self.host}:{self.port} "
             f"(network {self.network.network_id})"
         )
+
+        bootstrap_addrs = os.environ.get("FIRECLOUD_BOOTSTRAP", "")
+        for addr in bootstrap_addrs.split(","):
+            addr = addr.strip()
+            if not addr:
+                continue
+            try:
+                await self.connect(addr)
+                logger.info(f"Connected to bootstrap peer: {addr}")
+            except Exception as exc:
+                logger.warning(f"Bootstrap connect to {addr} failed: {exc}")
 
     async def stop(self) -> None:
         """Gracefully shut down the node."""
@@ -501,13 +514,21 @@ class Node:
         if node_id == self.node_id or node_id in self.connections:
             return
         self._known_peers[node_id] = (host, port)
-        asyncio.ensure_future(self._try_connect(node_id, host, port))
+        if hasattr(self, "loop") and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._try_connect(node_id, host, port), self.loop
+            )
+        else:
+            asyncio.ensure_future(self._try_connect(node_id, host, port))
 
     def _on_peer_removed(self, node_id: str) -> None:
         """Callback when mDNS detects a peer departure."""
         conn = self.connections.pop(node_id, None)
         if conn:
-            asyncio.ensure_future(conn.close())
+            if hasattr(self, "loop") and self.loop.is_running():
+                asyncio.run_coroutine_threadsafe(conn.close(), self.loop)
+            else:
+                asyncio.ensure_future(conn.close())
         logger.debug(f"Peer {node_id} removed via mDNS")
 
     async def _try_connect(self, node_id: str, host: str, port: int) -> None:
@@ -528,6 +549,23 @@ class Node:
 
         try:
             while self._running:
+                # try reconnecting bootstrap peers that dropped
+                for addr in os.environ.get("FIRECLOUD_BOOTSTRAP", "").split(","):
+                    addr = addr.strip()
+                    if not addr:
+                        continue
+                    try:
+                        h, p = addr.rsplit(":", 1)
+                        port_num = int(p)
+                        already = any(
+                            ph == h and pp == port_num and pid in self.connections
+                            for pid, (ph, pp) in self._known_peers.items()
+                        )
+                        if not already:
+                            await self.connect(addr)
+                    except Exception:
+                        pass
+
                 await asyncio.sleep(30)
                 ts = datetime.now(timezone.utc).isoformat().encode("utf-8")
                 payload = self.node_id.encode("utf-8") + b"|" + ts
