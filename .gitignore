@@ -38,9 +38,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Dev tool caches
-.antigravitycli/
-
 # Qdrant local data (created by fc-rag)
 ~/.fc_rag/
 
