@@ -62,7 +62,7 @@ def main() -> None:
 
     # inject failures
     console.print("[bold yellow][Phase 2][/bold yellow] Injecting failure signatures...")
-    for _ in range(10):
+    for _ in range(3):
         _write_reading(log_path, _anomalous_reading())
 
     # detect

@@ -38,8 +38,12 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# AI tool metadata — do not commit
+# Dev tool caches
 .antigravitycli/
 
 # Qdrant local data (created by fc-rag)
 ~/.fc_rag/
+
+# Test configurations
+test_config/
+
