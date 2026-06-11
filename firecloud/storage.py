@@ -1,10 +1,14 @@
 """Local filesystem chunk storage with sharded directories and quota enforcement."""
 
+import os
 import shutil
 import threading
 from pathlib import Path
 
 from firecloud.exceptions import ChunkNotFoundError, StorageFullError
+
+# Suffix for in-progress writes; never counted toward usage or listings.
+_TMP_SUFFIX = ".tmp"
 
 
 class ChunkStore:
@@ -37,6 +41,18 @@ class ChunkStore:
         else:
             self._max_storage = int(shutil.disk_usage(self._base).free * 0.8)
 
+        # Usage is tracked incrementally — a full tree walk on every
+        # store() call would make ingest quadratic in chunk count.
+        # Leftover temp files from interrupted writes are removed here.
+        self._used = 0
+        for path in self._base.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.name.endswith(_TMP_SUFFIX):
+                path.unlink(missing_ok=True)
+            else:
+                self._used += path.stat().st_size
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -52,14 +68,20 @@ class ChunkStore:
             StorageFullError: If storing *data* would exceed the quota.
         """
         with self._lock:
-            if self.used_bytes() + len(data) > self._max_storage:
+            path = self._chunk_path(chunk_id)
+            existing = path.stat().st_size if path.is_file() else 0
+            if self._used - existing + len(data) > self._max_storage:
                 raise StorageFullError(
                     f"Storing chunk {chunk_id} ({len(data)} bytes) would exceed "
                     f"the quota of {self._max_storage} bytes"
                 )
-            path = self._chunk_path(chunk_id)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            # Write-then-rename so a crash mid-write can never leave a
+            # truncated chunk under its content address.
+            tmp_path = path.with_name(path.name + _TMP_SUFFIX)
+            tmp_path.write_bytes(data)
+            os.replace(tmp_path, path)
+            self._used += len(data) - existing
 
     def retrieve(self, chunk_id: str) -> bytes:
         """Retrieve a stored chunk by its ID.
@@ -92,7 +114,9 @@ class ChunkStore:
         with self._lock:
             path = self._chunk_path(chunk_id)
             if path.is_file():
+                size = path.stat().st_size
                 path.unlink()
+                self._used = max(0, self._used - size)
                 # Clean up empty shard directory.
                 try:
                     path.parent.rmdir()
@@ -113,11 +137,7 @@ class ChunkStore:
 
     def used_bytes(self) -> int:
         """Return the total number of bytes consumed by stored chunks."""
-        total = 0
-        for path in self._base.rglob("*"):
-            if path.is_file():
-                total += path.stat().st_size
-        return total
+        return self._used
 
     def available_bytes(self) -> int:
         """Return the number of bytes remaining before the quota is hit."""
@@ -130,7 +150,7 @@ class ChunkStore:
             if not shard_dir.is_dir():
                 continue
             for chunk_file in sorted(shard_dir.iterdir()):
-                if chunk_file.is_file():
+                if chunk_file.is_file() and not chunk_file.name.endswith(_TMP_SUFFIX):
                     chunks.append(chunk_file.name)
         return chunks
 

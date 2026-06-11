@@ -282,3 +282,91 @@ class TestThreadSafety:
         assert len(m.list_files()) == 50
         # Clock should equal number of mutations.
         assert m._clock == 50
+
+
+# ------------------------------------------------------------------
+# Merge tie-breaking (concurrent updates with equal Lamport timestamps)
+# ------------------------------------------------------------------
+
+
+class TestMergeTieBreak:
+    """Equal Lamport timestamps must converge deterministically on all nodes."""
+
+    def test_equal_ts_converges_to_same_winner(self, tmp_path):
+        m_a = Manifest(tmp_path / "a")
+        m_b = Manifest(tmp_path / "b")
+
+        entry_a = _make_entry(file_id="f1", name="from-a.txt", uploaded_by="node-A")
+        entry_a.lamport_ts = 5
+        entry_b = _make_entry(file_id="f1", name="from-b.txt", uploaded_by="node-B")
+        entry_b.lamport_ts = 5
+
+        m_a._entries["f1"] = entry_a
+        m_b._entries["f1"] = entry_b
+
+        # Exchange manifests in both directions.
+        m_a.merge([entry_b])
+        m_b.merge([entry_a])
+
+        # Both nodes must agree on the winner (node-B sorts higher).
+        assert m_a.get_file("f1").name == "from-b.txt"
+        assert m_b.get_file("f1").name == "from-b.txt"
+
+    def test_equal_ts_prefers_tombstone(self, tmp_path):
+        m_a = Manifest(tmp_path / "a")
+        m_b = Manifest(tmp_path / "b")
+
+        live = _make_entry(file_id="f1", name="doc.txt", uploaded_by="node-B")
+        live.lamport_ts = 7
+        dead = _make_entry(file_id="f1", name="doc.txt", uploaded_by="node-A")
+        dead.lamport_ts = 7
+        dead.deleted = True
+        dead.deleted_at = datetime.now(timezone.utc).isoformat()
+
+        m_a._entries["f1"] = live
+        m_b._entries["f1"] = dead
+
+        m_a.merge([dead])
+        m_b.merge([live])
+
+        assert m_a._entries["f1"].deleted is True
+        assert m_b._entries["f1"].deleted is True
+
+
+# ------------------------------------------------------------------
+# Forward-compatible deserialisation
+# ------------------------------------------------------------------
+
+
+class TestEntryFromDict:
+    """Unknown fields from newer nodes must not break deserialisation."""
+
+    def test_ignores_unknown_fields(self):
+        from firecloud.manifest import entry_from_dict
+
+        raw = {
+            "file_id": "f1",
+            "name": "doc.txt",
+            "size": 100,
+            "chunk_count": 1,
+            "uploaded_at": "2026-06-11T00:00:00+00:00",
+            "uploaded_by": "node-A",
+            "lamport_ts": 3,
+            "future_field": "added in v2",
+            "chunks": [
+                {
+                    "chunk_id": "c1",
+                    "integrity_hash": "h1",
+                    "index": 0,
+                    "size": 100,
+                    "stored_on": ["node-A"],
+                    "future_chunk_field": 42,
+                }
+            ],
+        }
+
+        entry = entry_from_dict(raw)
+        assert entry.file_id == "f1"
+        assert entry.lamport_ts == 3
+        assert len(entry.chunks) == 1
+        assert entry.chunks[0].chunk_id == "c1"

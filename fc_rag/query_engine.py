@@ -6,12 +6,23 @@ import time
 from datetime import datetime, timezone
 
 import ollama
+from pydantic import BaseModel, ConfigDict
+
 from fc_rag.config import get_settings
-from fc_rag.retriever import retrieve
+from fc_rag.retriever import RetrievalResult, retrieve
 
 
-def query(user_question: str) -> str:
-    """Run the full RAG pipeline and return the LLM's answer."""
+class QueryResponse(BaseModel):
+    """Answer plus the retrieved chunks it was grounded on."""
+
+    model_config = ConfigDict(frozen=True)
+
+    answer: str
+    sources: list[RetrievalResult]
+
+
+def query(user_question: str) -> QueryResponse:
+    """Run the full RAG pipeline and return the answer with its sources."""
     settings = get_settings()
     start = time.monotonic()
 
@@ -76,4 +87,4 @@ def query(user_question: str) -> str:
             "success": success,
         }, default=str) + "\n")
 
-    return answer
+    return QueryResponse(answer=answer, sources=results)

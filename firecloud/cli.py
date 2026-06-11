@@ -35,6 +35,38 @@ def _load_network(passphrase: str) -> Network:
     except Exception as exc:
         raise click.ClickException(f"Failed to load network: {exc}") from exc
 
+def _storage_path(storage: str | None) -> Path:
+    """Resolve the storage directory: CLI flag → FIRECLOUD_DATA_DIR → default."""
+    if storage:
+        return Path(storage)
+    env_dir = os.environ.get("FIRECLOUD_DATA_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return _config_dir() / "storage"
+
+def _max_storage_bytes() -> int | None:
+    """Read the optional FIRECLOUD_MAX_STORAGE_GB quota from the environment."""
+    raw = os.environ.get("FIRECLOUD_MAX_STORAGE_GB")
+    if not raw:
+        return None
+    try:
+        return int(float(raw) * 1024 ** 3)
+    except ValueError:
+        raise click.ClickException(
+            f"Invalid FIRECLOUD_MAX_STORAGE_GB value: {raw!r}"
+        )
+
+async def _connect_bootstrap(node, bootstrap: str | None) -> None:
+    """Connect to an explicitly given bootstrap peer, warning on failure."""
+    if not bootstrap:
+        return
+    try:
+        await node.connect(bootstrap)
+    except Exception as exc:
+        click.echo(
+            click.style(f"⚠  Could not reach bootstrap {bootstrap}: {exc}", fg="yellow")
+        )
+
 def _human_size(num_bytes: int) -> str:
     """Convert bytes to a human-readable string."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -79,26 +111,29 @@ def init(join_addr: str | None, passphrase: str):
     click.echo(f"  Network ID : {net.network_id}")
     click.echo(f"  Keystore   : {keystore}")
 @cli.command()
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int, help="TCP port to listen on.")
 @click.option("--daemon", is_flag=True, help="Run in the background (Unix only).")
 @click.option("--storage", default=None, type=click.Path(), help="Storage directory.")
-def start(passphrase: str, port: int, daemon: bool, storage: str | None):
+@click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
+def start(passphrase: str, port: int, daemon: bool, storage: str | None, bootstrap: str | None):
     """Start the FireCloud node."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     if daemon:
-        _start_daemon(net, storage_path, port)
+        _start_daemon(net, storage_path, port, bootstrap)
     else:
-        _start_foreground(net, storage_path, port)
-def _start_foreground(net: Network, storage_path: Path, port: int):
+        _start_foreground(net, storage_path, port, bootstrap)
+def _start_foreground(net: Network, storage_path: Path, port: int, bootstrap: str | None = None):
     """Run the node in the foreground."""
     from firecloud.node import Node
 
     async def _run():
-        node = Node(network=net, storage_path=storage_path, port=port)
+        node = Node(network=net, storage_path=storage_path, port=port,
+                    max_storage=_max_storage_bytes())
         await node.start()
+        await _connect_bootstrap(node, bootstrap)
         click.echo(click.style(f"✓ Node {node.node_id} running on port {port}", fg="green"))
         click.echo("  Press Ctrl+C to stop.")
 
@@ -120,7 +155,7 @@ def _start_foreground(net: Network, storage_path: Path, port: int):
         click.echo(click.style("✓ Node stopped.", fg="green"))
 
     asyncio.run(_run())
-def _start_daemon(net: Network, storage_path: Path, port: int):
+def _start_daemon(net: Network, storage_path: Path, port: int, bootstrap: str | None = None):
     """Fork to background and write a PID file (Unix only)."""
     pid_file = _config_dir() / _PID_FILE
 
@@ -146,7 +181,7 @@ def _start_daemon(net: Network, storage_path: Path, port: int):
 
     # Child — detach and run
     os.setsid()
-    _start_foreground(net, storage_path, port)
+    _start_foreground(net, storage_path, port, bootstrap)
 @cli.command()
 def stop():
     """Stop a running FireCloud daemon."""
@@ -164,19 +199,19 @@ def stop():
     finally:
         pid_file.unlink(missing_ok=True)
 @cli.command()
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
 def status(passphrase: str, port: int, storage: str | None):
     """Show node and network status."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
 
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
-                     enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
         s = node.status()
         click.echo(click.style("FireCloud Status", fg="cyan", bold=True))
         click.echo(f"  Node ID          : {s['node_id']}")
@@ -192,21 +227,23 @@ def status(passphrase: str, port: int, storage: str | None):
     asyncio.run(_run())
 @cli.command()
 @click.argument("path", type=click.Path(exists=True))
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
-def upload(path: str, passphrase: str, port: int, storage: str | None):
+@click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
+def upload(path: str, passphrase: str, port: int, storage: str | None, bootstrap: str | None):
     """Upload a file to the FireCloud network."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
 
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
-                     enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
         await node.start()
         try:
+            await _connect_bootstrap(node, bootstrap)
             file_id = await node.upload(path)
             click.echo(click.style("✓ Uploaded successfully.", fg="green"))
             click.echo(f"  File ID: {file_id}")
@@ -219,21 +256,23 @@ def upload(path: str, passphrase: str, port: int, storage: str | None):
 @cli.command()
 @click.argument("file_id")
 @click.argument("output", type=click.Path())
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
-def download(file_id: str, output: str, passphrase: str, port: int, storage: str | None):
+@click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
+def download(file_id: str, output: str, passphrase: str, port: int, storage: str | None, bootstrap: str | None):
     """Download a file from the FireCloud network."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
 
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
-                     enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
         await node.start()
         try:
+            await _connect_bootstrap(node, bootstrap)
             await node.download(file_id, output)
             click.echo(click.style(f"✓ Downloaded to {output}", fg="green"))
         except FireCloudError as exc:
@@ -244,21 +283,23 @@ def download(file_id: str, output: str, passphrase: str, port: int, storage: str
     asyncio.run(_run())
 @cli.command("delete")
 @click.argument("file_id")
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
-def delete_file(file_id: str, passphrase: str, port: int, storage: str | None):
+@click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
+def delete_file(file_id: str, passphrase: str, port: int, storage: str | None, bootstrap: str | None):
     """Delete a file from the FireCloud network."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
 
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
-                     enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
         await node.start()
         try:
+            await _connect_bootstrap(node, bootstrap)
             await node.delete(file_id)
             click.echo(click.style(f"✓ File {file_id[:16]}... deleted.", fg="green"))
         except FireCloudError as exc:
@@ -269,19 +310,19 @@ def delete_file(file_id: str, passphrase: str, port: int, storage: str | None):
     asyncio.run(_run())
 # list
 @cli.command("list")
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
 def list_files(passphrase: str, port: int, storage: str | None):
     """List all files stored in the FireCloud network."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
 
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
-                     enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
         files = node.list_files()
         if not files:
             click.echo("No files stored.")
@@ -307,19 +348,85 @@ def list_files(passphrase: str, port: int, storage: str | None):
 
     asyncio.run(_run())
 @cli.command()
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.argument("file_id", required=False, default=None)
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
+@click.option("--port", default=7474, type=int)
+@click.option("--storage", default=None, type=click.Path())
+@click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
+def verify(file_id: str | None, passphrase: str, port: int, storage: str | None, bootstrap: str | None):
+    """Verify chunk availability and integrity for FILE_ID (or all files).
+
+    Reports each file as healthy (fully redundant), degraded (recoverable
+    but missing replicas/shares), or unrecoverable (data loss).
+    Exits non-zero when any file is unrecoverable.
+    """
+    net = _load_network(passphrase)
+    storage_path = _storage_path(storage)
+
+    from firecloud.node import Node
+
+    _STATUS_COLORS = {"healthy": "green", "degraded": "yellow", "unrecoverable": "red"}
+
+    async def _run() -> bool:
+        node = Node(network=net, storage_path=storage_path, port=port,
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
+        await node.start()
+        try:
+            await _connect_bootstrap(node, bootstrap)
+            if file_id:
+                reports = [await node.verify_file(file_id)]
+            else:
+                reports = await node.verify_all()
+
+            if not reports:
+                click.echo("No files to verify.")
+                return True
+
+            click.echo(
+                click.style(
+                    f"{'Name':<30} {'Strategy':<16} {'Chunks':>14} {'Status':<14}",
+                    bold=True,
+                )
+            )
+            click.echo("─" * 76)
+            for r in reports:
+                status = r["status"]
+                chunks_col = f"{r['available_chunks']}/{r['total_chunks']}"
+                click.echo(
+                    f"{r['name']:<30} "
+                    f"{r['strategy']:<16} "
+                    f"{chunks_col:>14} "
+                    + click.style(f"{status:<14}", fg=_STATUS_COLORS[status])
+                )
+                if status != "healthy":
+                    for c in r["chunks"]:
+                        if not c["locations"]:
+                            click.echo(
+                                f"    missing chunk {c['index']}: {c['chunk_id'][:24]}..."
+                            )
+            return all(r["status"] != "unrecoverable" for r in reports)
+        except FireCloudError as exc:
+            raise click.ClickException(str(exc))
+        finally:
+            await node.stop()
+
+    ok = asyncio.run(_run())
+    if not ok:
+        raise SystemExit(1)
+@cli.command()
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
 def peers(passphrase: str, port: int, storage: str | None):
     """List known peers."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
 
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
-                     enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
         peer_list = node.peers()
         if not peer_list:
             click.echo("No known peers.")
@@ -340,19 +447,19 @@ def peers(passphrase: str, port: int, storage: str | None):
     asyncio.run(_run())
 @cli.command()
 @click.argument("address")
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
 def connect(address: str, passphrase: str, port: int, storage: str | None):
     """Connect to a peer at ADDRESS (host:port)."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
 
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
-                     enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
         await node.start()
         try:
             await node.connect(address)
@@ -365,19 +472,19 @@ def connect(address: str, passphrase: str, port: int, storage: str | None):
     asyncio.run(_run())
 @cli.command("remove-node")
 @click.argument("node_id")
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
 def remove_node(node_id: str, passphrase: str, port: int, storage: str | None):
     """Remove a node from the network and trigger re-replication."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
 
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
-                     enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False)
         await node.start()
         try:
             await node.remove_node(node_id)
@@ -390,21 +497,24 @@ def remove_node(node_id: str, passphrase: str, port: int, storage: str | None):
     asyncio.run(_run())
 @cli.command()
 @click.argument("folder", type=click.Path())
-@click.option("--passphrase", prompt=True, hide_input=True, help="Network passphrase.")
+@click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
 @click.option("--port", default=7474, type=int)
 @click.option("--storage", default=None, type=click.Path())
 @click.option("--daemon", is_flag=True, help="Run in the background (Unix only).")
-def sync(folder: str, passphrase: str, port: int, storage: str | None, daemon: bool):
+@click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
+def sync(folder: str, passphrase: str, port: int, storage: str | None, daemon: bool, bootstrap: str | None):
     """Sync a local folder with the FireCloud network."""
     net = _load_network(passphrase)
-    storage_path = Path(storage) if storage else _config_dir() / "storage"
+    storage_path = _storage_path(storage)
 
     from firecloud.node import Node
     from firecloud.sync import FolderSync
 
     async def _run():
-        node = Node(network=net, storage_path=storage_path, port=port)
+        node = Node(network=net, storage_path=storage_path, port=port,
+                    max_storage=_max_storage_bytes())
         await node.start()
+        await _connect_bootstrap(node, bootstrap)
         fs = FolderSync(node, Path(folder))
         await fs.start()
         click.echo(click.style(f"✓ Syncing {folder}", fg="green"))

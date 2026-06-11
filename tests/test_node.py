@@ -7,11 +7,8 @@ from pathlib import Path
 import pytest
 
 from firecloud.exceptions import (
-    ChunkCorruptError,
     FileNotFoundError as ManifestFileNotFoundError,
-    StorageFullError,
 )
-from firecloud.manifest import ChunkInfo, FileEntry
 from firecloud.network import Network
 from firecloud.node import Node
 
@@ -280,9 +277,8 @@ class TestTwoNodeTransport:
         await node_b.start()
 
         try:
-            # Determine actual ports
+            # Determine actual port of A
             a_port = node_a._server.server.sockets[0].getsockname()[1]
-            b_port = node_b._server.server.sockets[0].getsockname()[1]
 
             # B connects to A
             await node_b.connect(f"127.0.0.1:{a_port}")
@@ -438,3 +434,138 @@ class TestNodeRemovalAndRereplication:
             await node_c.stop()
             await node_b.stop()
             await node_a.stop()
+
+
+# ---------------------------------------------------------------------------
+# FEC download after cluster shrink (regression: strategy from manifest)
+# ---------------------------------------------------------------------------
+
+
+class TestFecDownloadAfterClusterShrink:
+
+    async def test_fec_file_downloads_with_fewer_live_peers(self, tmp_path):
+        """A file uploaded with erasure coding (5 nodes) must still download
+        after a peer goes offline (4 live nodes — below the FEC threshold).
+
+        Before the fix, download re-derived the strategy from the live peer
+        count and tried to read the FEC shares as replicated chunks.
+        """
+        net = Network.create("fec-shrink-test")
+
+        nodes = {
+            name: Node(
+                network=net,
+                storage_path=tmp_path / name,
+                port=0,
+                enable_discovery=False,
+                node_id=name,
+            )
+            for name in ("node-a", "node-b", "node-c", "node-d", "node-e")
+        }
+        for node in nodes.values():
+            await node.start()
+
+        try:
+            node_a = nodes["node-a"]
+            for name, node in nodes.items():
+                if name == "node-a":
+                    continue
+                port = node._server.server.sockets[0].getsockname()[1]
+                await node_a.connect(f"127.0.0.1:{port}")
+            await asyncio.sleep(0.3)
+            assert len(node_a.connections) == 4
+
+            src = _make_test_file(tmp_path / "src", size=256 * 1024)
+            original = src.read_bytes()
+            file_id = await node_a.upload(src)
+
+            entry = node_a.manifest.get_file(file_id)
+            assert entry.fec_enabled, "5-node upload should use erasure coding"
+
+            # One peer goes offline -> 4 live nodes, below the FEC threshold.
+            await nodes["node-e"].stop()
+            await asyncio.sleep(0.3)
+            assert len(node_a.connections) == 3
+
+            dest = tmp_path / "out" / "restored.bin"
+            await node_a.download(file_id, dest)
+            assert dest.read_bytes() == original
+
+        finally:
+            for node in nodes.values():
+                await node.stop()
+
+
+# ---------------------------------------------------------------------------
+# verify_file / verify_all
+# ---------------------------------------------------------------------------
+
+
+class TestVerify:
+
+    async def test_verify_healthy_file(self, tmp_path):
+        node = _make_node(tmp_path)
+        await node.start()
+        try:
+            src = _make_test_file(tmp_path / "src")
+            file_id = await node.upload(src)
+
+            report = await node.verify_file(file_id)
+            assert report["status"] == "healthy"
+            assert report["available_chunks"] == report["total_chunks"]
+            assert all(c["locations"] for c in report["chunks"])
+        finally:
+            await node.stop()
+
+    async def test_verify_detects_missing_chunk(self, tmp_path):
+        node = _make_node(tmp_path)
+        await node.start()
+        try:
+            src = _make_test_file(tmp_path / "src")
+            file_id = await node.upload(src)
+
+            entry = node.manifest.get_file(file_id)
+            node.chunk_store.delete(entry.chunks[0].chunk_id)
+
+            report = await node.verify_file(file_id)
+            assert report["status"] == "unrecoverable"
+            assert report["available_chunks"] == report["total_chunks"] - 1
+        finally:
+            await node.stop()
+
+    async def test_verify_detects_corrupt_chunk(self, tmp_path):
+        node = _make_node(tmp_path)
+        await node.start()
+        try:
+            src = _make_test_file(tmp_path / "src")
+            file_id = await node.upload(src)
+
+            entry = node.manifest.get_file(file_id)
+            node.chunk_store.store(entry.chunks[0].chunk_id, b"not-the-real-bytes")
+
+            report = await node.verify_file(file_id)
+            assert report["status"] == "unrecoverable"
+        finally:
+            await node.stop()
+
+    async def test_verify_all(self, tmp_path):
+        node = _make_node(tmp_path)
+        await node.start()
+        try:
+            await node.upload(_make_test_file(tmp_path / "src", name="one.bin"))
+            await node.upload(_make_test_file(tmp_path / "src", name="two.bin"))
+
+            reports = await node.verify_all()
+            assert len(reports) == 2
+            assert all(r["status"] == "healthy" for r in reports)
+        finally:
+            await node.stop()
+
+    async def test_verify_unknown_file_raises(self, tmp_path):
+        node = _make_node(tmp_path)
+        await node.start()
+        try:
+            with pytest.raises(ManifestFileNotFoundError):
+                await node.verify_file("0" * 64)
+        finally:
+            await node.stop()

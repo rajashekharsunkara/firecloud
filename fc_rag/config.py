@@ -22,3 +22,18 @@ class Settings(BaseModel):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache(maxsize=1)
+def get_client():
+    """Shared embedded-Qdrant client.
+
+    Embedded Qdrant locks its storage directory per client instance, so
+    indexing and retrieval within one process must reuse a single client
+    rather than each opening their own.
+    """
+    from qdrant_client import QdrantClient
+
+    settings = get_settings()
+    settings.qdrant_path.mkdir(parents=True, exist_ok=True)
+    return QdrantClient(path=str(settings.qdrant_path))

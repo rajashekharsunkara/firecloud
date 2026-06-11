@@ -5,10 +5,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    FilterSelector,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 from rich.progress import Progress
 
-from fc_rag.config import get_settings
+from fc_rag.config import get_client, get_settings
 from fc_rag.embedder import chunk_text, embed_chunks
 
 _SUPPORTED_EXTENSIONS = {".txt", ".md", ".py", ".json"}
@@ -64,9 +72,7 @@ def index_path(path: Path) -> int:
     _safety_check(path)
 
     settings = get_settings()
-    settings.qdrant_path.mkdir(parents=True, exist_ok=True)
-
-    client = QdrantClient(path=str(settings.qdrant_path))
+    client = get_client()
     _ensure_collection(client, settings.collection_name)
 
     if path.is_file():
@@ -99,9 +105,28 @@ def index_path(path: Path) -> int:
             vectors = embed_chunks(chunks)
             now = datetime.now(timezone.utc).isoformat()
 
+            # Drop previously indexed points for this file so re-indexing
+            # cannot accumulate duplicates or leave stale trailing chunks.
+            client.delete(
+                collection_name=settings.collection_name,
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="filepath",
+                                match=MatchValue(value=str(filepath)),
+                            )
+                        ]
+                    )
+                ),
+            )
+
             points = [
                 PointStruct(
-                    id=str(uuid.uuid4()),
+                    # Deterministic ID per (file, chunk position) — an
+                    # upsert of the same file overwrites instead of
+                    # duplicating.
+                    id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{filepath}::{i}")),
                     vector=vec,
                     payload={
                         "filename": filepath.name,

@@ -1,9 +1,8 @@
 """Search the local Qdrant collection for relevant chunks."""
 
 from pydantic import BaseModel, ConfigDict
-from qdrant_client import QdrantClient
 
-from fc_rag.config import get_settings
+from fc_rag.config import get_client, get_settings
 from fc_rag.embedder import embed_chunks
 
 
@@ -26,13 +25,17 @@ def retrieve(query: str, top_k: int | None = None) -> list[RetrievalResult]:
         return []
     query_vector = vectors[0]
 
-    client = QdrantClient(path=str(settings.qdrant_path))
+    client = get_client()
 
-    response = client.query_points(
-        collection_name=settings.collection_name,
-        query=query_vector,
-        limit=k,
-    )
+    try:
+        response = client.query_points(
+            collection_name=settings.collection_name,
+            query=query_vector,
+            limit=k,
+        )
+    except Exception:
+        # Collection does not exist yet — nothing has been indexed.
+        return []
     results = response.points
 
     return [

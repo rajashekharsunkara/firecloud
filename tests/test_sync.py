@@ -4,7 +4,6 @@ import asyncio
 import os
 from pathlib import Path
 
-import pytest
 
 from firecloud.network import Network
 from firecloud.node import Node
@@ -150,7 +149,7 @@ class TestInboundSync:
             src.parent.mkdir(parents=True, exist_ok=True)
             content = os.urandom(5000)
             src.write_bytes(content)
-            file_id = await node.upload(src)
+            await node.upload(src)
 
             # Now start sync pointing at a separate, empty folder
             sync_dir = tmp_path / "sync"

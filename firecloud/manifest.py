@@ -2,7 +2,7 @@
 
 import json
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -41,6 +41,25 @@ class FileEntry:
     replication_factor: int = 1
     deleted: bool = False  # tombstone flag
     deleted_at: str | None = None  # ISO 8601 when tombstoned
+
+
+_CHUNK_INFO_FIELDS = {f.name for f in fields(ChunkInfo)}
+_FILE_ENTRY_FIELDS = {f.name for f in fields(FileEntry)}
+
+
+def entry_from_dict(raw: dict) -> FileEntry:
+    """Build a :class:`FileEntry` from a plain dict, ignoring unknown keys.
+
+    Used for both disk deserialisation and remote manifest sync, so a
+    newer node adding fields cannot break older nodes (and vice versa).
+    """
+    data = dict(raw)
+    chunks = [
+        ChunkInfo(**{k: v for k, v in ci.items() if k in _CHUNK_INFO_FIELDS})
+        for ci in data.pop("chunks", [])
+    ]
+    kwargs = {k: v for k, v in data.items() if k in _FILE_ENTRY_FIELDS}
+    return FileEntry(**kwargs, chunks=chunks)
 
 
 # ------------------------------------------------------------------
@@ -150,13 +169,29 @@ class Manifest:
                 return list(self._entries.values())
             return [e for e in self._entries.values() if not e.deleted]
 
+    @staticmethod
+    def _remote_wins(remote: FileEntry, local: FileEntry) -> bool:
+        """Deterministic last-writer-wins ordering for concurrent entries.
+
+        Primary order is the Lamport timestamp.  Equal timestamps from
+        different nodes are broken by preferring tombstones, then by
+        uploader node ID, so every node converges on the same winner
+        instead of each keeping its own version forever.
+        """
+        if remote.lamport_ts != local.lamport_ts:
+            return remote.lamport_ts > local.lamport_ts
+        if remote.deleted != local.deleted:
+            return remote.deleted
+        return remote.uploaded_by > local.uploaded_by
+
     def merge(self, remote_entries: list[FileEntry]) -> None:
         """Merge remote manifest entries using last-writer-wins.
 
-        For each remote entry the local entry is replaced only when the
-        remote Lamport timestamp is strictly greater.  New file IDs are
-        always accepted.  The local clock is advanced to the maximum of the
-        local clock and the highest remote timestamp.
+        For each remote entry the local entry is replaced when the remote
+        Lamport timestamp is strictly greater, with a deterministic
+        tie-break (tombstone, then uploader node ID) for equal timestamps.
+        New file IDs are always accepted.  The local clock is advanced to
+        the maximum of the local clock and the highest remote timestamp.
 
         Args:
             remote_entries: Entries received from a remote node.
@@ -164,7 +199,7 @@ class Manifest:
         with self._lock:
             for remote in remote_entries:
                 local = self._entries.get(remote.file_id)
-                if local is None or remote.lamport_ts > local.lamport_ts:
+                if local is None or self._remote_wins(remote, local):
                     self._entries[remote.file_id] = remote
                 # Advance clock to at least the remote timestamp.
                 if remote.lamport_ts > self._clock:
@@ -213,6 +248,11 @@ class Manifest:
 
     def to_dict(self) -> dict:
         """Serialise the entire manifest to a plain ``dict``."""
+        with self._lock:
+            return self._to_dict_unlocked()
+
+    def _to_dict_unlocked(self) -> dict:
+        """Serialise without taking the lock (caller must hold ``_lock``)."""
         return {
             "clock": self._clock,
             "entries": {
@@ -245,19 +285,21 @@ class Manifest:
             self._clock = raw.get("clock", 0)
             self._entries = {}
             for fid, edict in raw.get("entries", {}).items():
-                # Reconstruct ChunkInfo objects.
-                chunks = [
-                    ChunkInfo(**ci) for ci in edict.pop("chunks", [])
-                ]
-                self._entries[fid] = FileEntry(**edict, chunks=chunks)
+                self._entries[fid] = entry_from_dict(edict)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
     def _save_unlocked(self) -> None:
-        """Write manifest JSON to disk (caller must hold ``_lock``)."""
-        self._manifest_file.write_text(
-            json.dumps(self.to_dict(), indent=2, default=str),
+        """Write manifest JSON to disk (caller must hold ``_lock``).
+
+        Writes to a temporary file and renames it into place so a crash
+        mid-write cannot leave a truncated manifest behind.
+        """
+        tmp_file = self._manifest_file.with_name(self._manifest_file.name + ".tmp")
+        tmp_file.write_text(
+            json.dumps(self._to_dict_unlocked(), indent=2, default=str),
             encoding="utf-8",
         )
+        tmp_file.replace(self._manifest_file)

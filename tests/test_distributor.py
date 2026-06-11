@@ -1,8 +1,5 @@
 import asyncio
-import os
 import pytest
-import tempfile
-from pathlib import Path
 from dataclasses import dataclass
 
 from firecloud.network import Network
@@ -179,3 +176,137 @@ async def test_distribute_retrieve_erasure_coding(tmp_path):
         
     for srv in servers:
         await srv.stop()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_honors_manifest_strategy_after_cluster_shrink(tmp_path):
+    """Erasure-coded files must be read back as erasure-coded even when the
+    live peer count has dropped below the FEC threshold (the strategy must
+    come from the manifest, not the current cluster size)."""
+    net = Network.create("passphrase")
+
+    node_a = MockNode("node-A", net, tmp_path)
+    peers = [MockNode(f"node-{x}", net, tmp_path) for x in "BCDE"]
+
+    servers = []
+    client_a = NodeClient(node_a)
+    for peer in peers:
+        srv = NodeServer(peer, "127.0.0.1", 0)
+        await srv.start()
+        servers.append(srv)
+        await client_a.connect("127.0.0.1", srv.server.sockets[0].getsockname()[1])
+    await asyncio.sleep(0.2)
+
+    # Upload with 5 total nodes -> erasure coding (K=3, N=5)
+    d_upload = Distributor(
+        peers=["node-B", "node-C", "node-D", "node-E"],
+        local_node_id="node-A",
+    )
+    chunks = [
+        SimpleChunk("id1", "hash1", 0, b"data1"),
+        SimpleChunk("id2", "hash2", 1, b"data2"),
+        SimpleChunk("id3", "hash3", 2, b"data3"),
+    ]
+    infos = await d_upload.distribute(chunks, client_a)
+    assert d_upload.get_strategy() == "erasure_coding"
+    assert len(infos) == 5
+
+    # Cluster shrinks: only D and E remain (3 total nodes < threshold 5).
+    await servers[0].stop()  # B
+    await servers[1].stop()  # C
+    await asyncio.sleep(0.2)
+
+    d_download = Distributor(
+        peers=list(node_a.connections.keys()),
+        local_node_id="node-A",
+        fec_enabled=True,
+    )
+    # The live-count heuristic would now pick the wrong strategy...
+    assert d_download.get_strategy() == "replication"
+
+    # ...but an explicit manifest-derived strategy reconstructs correctly.
+    retrieved = await d_download.retrieve(
+        infos, client_a, strategy="erasure_coding", k=3
+    )
+    assert retrieved == [b"data1", b"data2", b"data3"]
+
+    for srv in servers[2:]:
+        await srv.stop()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_share_is_skipped_during_reconstruction(tmp_path):
+    """A share whose bytes do not match its integrity hash must be treated
+    as missing instead of poisoning the FEC reconstruction."""
+    net = Network.create("passphrase")
+
+    node_a = MockNode("node-A", net, tmp_path)
+    peers = [MockNode(f"node-{x}", net, tmp_path) for x in "BCDE"]
+
+    servers = []
+    client_a = NodeClient(node_a)
+    for peer in peers:
+        srv = NodeServer(peer, "127.0.0.1", 0)
+        await srv.start()
+        servers.append(srv)
+        await client_a.connect("127.0.0.1", srv.server.sockets[0].getsockname()[1])
+    await asyncio.sleep(0.2)
+
+    d = Distributor(
+        peers=["node-B", "node-C", "node-D", "node-E"],
+        local_node_id="node-A",
+    )
+    chunks = [
+        SimpleChunk("id1", "hash1", 0, b"data1"),
+        SimpleChunk("id2", "hash2", 1, b"data2"),
+        SimpleChunk("id3", "hash3", 2, b"data3"),
+    ]
+    infos = await d.distribute(chunks, client_a)
+    await asyncio.sleep(0.2)
+
+    # Corrupt the first share in place on whichever node holds it.
+    first = infos[0]
+    holders = [node_a] + peers
+    for holder in holders:
+        if holder.chunk_store.has(first.chunk_id):
+            holder.chunk_store.store(first.chunk_id, b"corrupted-bytes")
+
+    retrieved = await d.retrieve(infos, client_a, strategy="erasure_coding", k=3)
+    assert retrieved == [b"data1", b"data2", b"data3"]
+
+    for srv in servers:
+        await srv.stop()
+
+
+@pytest.mark.asyncio
+async def test_distribute_skips_full_peer_and_records_actual_placement(tmp_path):
+    """Placement metadata must reflect where chunks were actually stored —
+    a peer that rejects the store (quota) must not appear in stored_on."""
+    net = Network.create("passphrase")
+
+    node_a = MockNode("node-A", net, tmp_path)
+    node_b = MockNode("node-B", net, tmp_path)
+    node_b.chunk_store._max_storage = 0  # B can store nothing
+
+    server_b = NodeServer(node_b, "127.0.0.1", 0)
+    await server_b.start()
+    port_b = server_b.server.sockets[0].getsockname()[1]
+
+    client_a = NodeClient(node_a)
+    await client_a.connect("127.0.0.1", port_b)
+    await asyncio.sleep(0.1)
+
+    d = Distributor(peers=["node-B"], local_node_id="node-A")
+    chunks = [SimpleChunk("a" * 64, "hash1", 0, b"data1")]
+
+    infos = await d.distribute(chunks, client_a)
+
+    assert infos[0].stored_on == ["node-A"]
+    assert node_a.chunk_store.has("a" * 64)
+    assert not node_b.chunk_store.has("a" * 64)
+
+    # Retrieval still works from the surviving replica.
+    retrieved = await d.retrieve(infos, client_a, strategy="replication")
+    assert retrieved == [b"data1"]
+
+    await server_b.stop()

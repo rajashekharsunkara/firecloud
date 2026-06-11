@@ -36,10 +36,13 @@ def _load_manifest() -> list[dict]:
 
 def _save_manifest(entries: list[dict]) -> None:
     _MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _MANIFEST_PATH.write_text(
+    # Write-then-rename so a crash mid-write cannot truncate the manifest.
+    tmp_path = _MANIFEST_PATH.with_name(_MANIFEST_PATH.name + ".tmp")
+    tmp_path.write_text(
         json.dumps(entries, indent=2, default=str),
         encoding="utf-8",
     )
+    tmp_path.replace(_MANIFEST_PATH)
 
 
 async def save_artifact(
@@ -70,6 +73,12 @@ async def save_artifact(
     )
 
     entries = _load_manifest()
+    # Re-saving the same name+version replaces the old record — otherwise
+    # load_artifact would keep returning the stale first match forever.
+    entries = [
+        e for e in entries
+        if not (e.get("name") == name and e.get("version") == version)
+    ]
     entries.append(metadata.model_dump())
     _save_manifest(entries)
     return metadata

@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 
 from firecloud.network import Network
 from firecloud.crypto import (

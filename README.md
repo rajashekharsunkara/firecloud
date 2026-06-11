@@ -35,7 +35,26 @@ docker exec firecloud-bootstrap firecloud upload /data/my-file.zip
 
 # 3. Download from any node
 docker exec firecloud-node-1 firecloud download <file_id> /data/restored.zip
+
+# 4. Check replica/share health across the network
+docker exec firecloud-bootstrap firecloud verify
 ```
+
+### CLI essentials
+
+```bash
+firecloud init                          # create a network keystore
+firecloud start --bootstrap host:7474   # run a node, optionally joining a peer
+firecloud upload <path>                 # chunk → encrypt → distribute
+firecloud download <file_id> <output>   # retrieve → verify → reassemble
+firecloud verify [file_id]              # health report: healthy / degraded / unrecoverable
+firecloud sync <folder>                 # bi-directional folder sync
+```
+
+Environment variables (all optional): `FIRECLOUD_PASSPHRASE` (skip the
+passphrase prompt), `FIRECLOUD_DATA_DIR` (default storage directory),
+`FIRECLOUD_MAX_STORAGE_GB` (chunk-store quota), and `FIRECLOUD_BOOTSTRAP`
+(comma-separated peers to connect to on start).
 
 ---
 
@@ -63,6 +82,10 @@ docker exec firecloud-node-1 firecloud download <file_id> /data/restored.zip
 ## Security
 
 FireCloud uses **HMAC-SHA-256 with a network-derived key** for chunk addressing instead of plain SHA-256. This raises the cost of confirmation-of-file attacks — an attacker who suspects a specific file is stored cannot verify its presence by computing chunk hashes from the plaintext, because valid chunk IDs require the network key. This protection holds as long as the network key remains confidential.
+
+Chunks are encrypted with XChaCha20-Poly1305 before leaving the machine, so storage nodes only ever see authenticated ciphertext. Transport hardening includes a frame-size cap, handshake and request timeouts, and constant-time auth-token comparison.
+
+**Known limitations (devnet):** node TLS certificates are self-signed and clients do not verify them, so the TLS layer protects against passive snooping but not an active man-in-the-middle on your LAN; the chunk payloads themselves remain end-to-end encrypted regardless. Deploy only on networks you control.
 
 ---
 

@@ -1,6 +1,5 @@
 import asyncio
 import pytest
-from pathlib import Path
 
 from firecloud.discovery import LANDiscovery, PeerConfig
 

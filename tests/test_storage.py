@@ -186,3 +186,55 @@ class TestThreadSafety:
         assert errors == [], f"Unexpected errors: {errors}"
         stored = store.list_chunks()
         assert set(stored) == set(ids)
+
+
+# ------------------------------------------------------------------
+# Incremental usage accounting
+# ------------------------------------------------------------------
+
+
+class TestUsageAccounting:
+    """used_bytes must stay accurate across overwrites, deletes, restarts."""
+
+    def test_overwrite_replaces_usage(self, storage_dir):
+        store = ChunkStore(storage_dir)
+        store.store(CHUNK_ID_A, b"x" * 100)
+        store.store(CHUNK_ID_A, b"y" * 40)  # overwrite, not accumulate
+        assert store.used_bytes() == 40
+
+    def test_delete_releases_usage(self, storage_dir):
+        store = ChunkStore(storage_dir)
+        store.store(CHUNK_ID_A, b"x" * 100)
+        store.store(CHUNK_ID_B, b"y" * 50)
+        store.delete(CHUNK_ID_A)
+        assert store.used_bytes() == 50
+
+    def test_usage_rescanned_on_restart(self, storage_dir):
+        store = ChunkStore(storage_dir)
+        store.store(CHUNK_ID_A, b"x" * 100)
+        store.store(CHUNK_ID_B, b"y" * 50)
+
+        store2 = ChunkStore(storage_dir)
+        assert store2.used_bytes() == 150
+
+    def test_leftover_tmp_file_cleaned_on_init(self, storage_dir):
+        store = ChunkStore(storage_dir)
+        store.store(CHUNK_ID_A, b"x" * 100)
+
+        # Simulate a crash that left a partial write behind.
+        shard = storage_dir / CHUNK_ID_B[:2]
+        shard.mkdir(parents=True, exist_ok=True)
+        leftover = shard / (CHUNK_ID_B + ".tmp")
+        leftover.write_bytes(b"partial-write")
+
+        store2 = ChunkStore(storage_dir)
+        assert not leftover.exists()
+        assert store2.used_bytes() == 100
+        assert store2.list_chunks() == [CHUNK_ID_A]
+
+    def test_overwrite_within_quota_succeeds(self, storage_dir):
+        # Quota check must account for the bytes being replaced.
+        store = ChunkStore(storage_dir, max_storage=100)
+        store.store(CHUNK_ID_A, b"x" * 90)
+        store.store(CHUNK_ID_A, b"y" * 95)  # would fail if 90+95 were summed
+        assert store.retrieve(CHUNK_ID_A) == b"y" * 95

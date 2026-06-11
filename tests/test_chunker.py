@@ -1,9 +1,6 @@
 import os
-from pathlib import Path
-import pytest
 
 from firecloud.chunker import (
-    Chunk,
     chunk_file,
     chunk_bytes,
     reassemble_chunks,
@@ -37,7 +34,10 @@ def test_medium_file(sample_file, network_key):
         max_size=8192,
     )
     assert len(chunks) > 1
-    
+
+    # Chunks must concatenate back to the original content
+    assert b"".join(c.data for c in chunks) == content
+
     # Assert proper indexing
     for idx, c in enumerate(chunks):
         assert c.index == idx

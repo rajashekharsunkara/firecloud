@@ -7,6 +7,7 @@ manifest synchronization, and heartbeat monitoring.
 
 import asyncio
 from datetime import datetime, timezone, timedelta
+import hmac
 import json
 import logging
 from pathlib import Path
@@ -31,9 +32,28 @@ MSG_STORE_CHUNK = 0x10
 MSG_RETRIEVE_CHUNK = 0x11
 MSG_CHUNK_DATA = 0x12
 MSG_CHUNK_NOT_FOUND = 0x13
+MSG_STORE_OK = 0x14
+MSG_STORE_FAIL = 0x15
+MSG_HAS_CHUNK = 0x16
+MSG_HAS_CHUNK_RESP = 0x17
 MSG_SYNC_MANIFEST = 0x20
 MSG_HEARTBEAT = 0x30
 MSG_PEER_LIST = 0x40
+
+# Largest frame a peer may send.  Chunks top out at 64 KiB plus encryption
+# overhead; manifest syncs are the only frames that can grow into the
+# megabytes, so 64 MiB leaves generous headroom while preventing a hostile
+# or corrupt length prefix from triggering a multi-gigabyte allocation.
+MAX_FRAME_SIZE = 64 * 1024 * 1024
+
+# How long to wait for a peer to complete the auth handshake.
+HANDSHAKE_TIMEOUT = 10.0
+
+# Default wait for a response to a chunk request before giving up.
+REQUEST_TIMEOUT = 30.0
+
+# Chunk IDs are HMAC-SHA-256 hex digests — always 64 bytes on the wire.
+_CHUNK_ID_LEN = 64
 
 # ---------------------------------------------------------------------------
 # TLS & Certificate Helpers
@@ -106,10 +126,16 @@ async def read_msg(reader: asyncio.StreamReader) -> tuple[int, bytes]:
     try:
         header = await reader.readexactly(4)
         length = struct.unpack("!I", header)[0]
+        if length > MAX_FRAME_SIZE:
+            raise TransportError(
+                f"Frame length {length} exceeds maximum of {MAX_FRAME_SIZE} bytes"
+            )
         msg_type_byte = await reader.readexactly(1)
         msg_type = msg_type_byte[0]
         payload = await reader.readexactly(length)
         return msg_type, payload
+    except TransportError:
+        raise
     except asyncio.IncompleteReadError as exc:
         raise TransportError("Connection closed prematurely during read") from exc
     except Exception as exc:
@@ -147,7 +173,11 @@ class PeerConnection:
         self.node = node
         self.write_lock = asyncio.Lock()
         self.retrieve_lock = asyncio.Lock()
-        self.pending_retrieve: asyncio.Future[bytes | None] | None = None
+        # In-flight requests awaiting a peer response, keyed by
+        # (kind, chunk_id) so a late or duplicate response can never be
+        # delivered to the wrong request.
+        self._pending: dict[tuple[str, str], asyncio.Future] = {}
+        self._closed = False
         self.last_seen = datetime.now(timezone.utc)
         self.read_task = asyncio.create_task(self._read_loop())
 
@@ -156,17 +186,92 @@ class PeerConnection:
         async with self.write_lock:
             await write_msg(self.writer, msg_type, payload)
 
-    async def retrieve_chunk(self, chunk_id: str) -> bytes | None:
-        """Request and retrieve a chunk from this peer."""
+    async def _request(
+        self,
+        kind: str,
+        msg_type: int,
+        chunk_id: str,
+        payload: bytes,
+        timeout: float,
+    ):
+        """Send a request and wait for the matching response.
+
+        Returns the future's result, or ``None`` when the peer does not
+        answer in time or the connection drops — callers treat that as a
+        miss and fall back to other peers.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        key = (kind, chunk_id)
+        self._pending[key] = future
+        try:
+            await self.send_message(msg_type, payload)
+            return await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Peer {self.peer_node_id} did not answer {kind} for chunk "
+                f"{chunk_id[:16]}... within {timeout}s"
+            )
+            return None
+        except (TransportError, OSError) as exc:
+            logger.debug(
+                f"{kind} for chunk {chunk_id[:16]}... failed on peer "
+                f"{self.peer_node_id}: {exc}"
+            )
+            return None
+        finally:
+            self._pending.pop(key, None)
+
+    async def retrieve_chunk(
+        self, chunk_id: str, timeout: float = REQUEST_TIMEOUT
+    ) -> bytes | None:
+        """Request and retrieve a chunk from this peer.
+
+        Returns ``None`` if the peer does not have the chunk, does not
+        respond within *timeout* seconds, or the connection fails.
+        """
         async with self.retrieve_lock:
-            loop = asyncio.get_running_loop()
-            self.pending_retrieve = loop.create_future()
-            try:
-                await self.send_message(MSG_RETRIEVE_CHUNK, chunk_id.encode("utf-8"))
-                # Wait for the background loop to resolve the future
-                return await self.pending_retrieve
-            finally:
-                self.pending_retrieve = None
+            return await self._request(
+                "retrieve",
+                MSG_RETRIEVE_CHUNK,
+                chunk_id,
+                chunk_id.encode("utf-8"),
+                timeout,
+            )
+
+    async def store_chunk(
+        self, chunk_id: str, data: bytes, timeout: float = REQUEST_TIMEOUT
+    ) -> bool:
+        """Store a chunk on this peer and wait for acknowledgement.
+
+        Returns ``True`` only when the peer confirms the chunk was
+        persisted, so callers can record placement accurately.
+        """
+        result = await self._request(
+            "store",
+            MSG_STORE_CHUNK,
+            chunk_id,
+            chunk_id.encode("utf-8") + data,
+            timeout,
+        )
+        return bool(result)
+
+    async def has_chunk(self, chunk_id: str, timeout: float = 10.0) -> bool:
+        """Ask the peer whether it holds a chunk, without transferring it."""
+        result = await self._request(
+            "has",
+            MSG_HAS_CHUNK,
+            chunk_id,
+            chunk_id.encode("utf-8"),
+            timeout,
+        )
+        return bool(result)
+
+    def _resolve(self, kind: str, chunk_id: str, value) -> None:
+        """Resolve a pending request future, ignoring stale responses."""
+        future = self._pending.get((kind, chunk_id))
+        if future is not None and not future.done():
+            future.set_result(value)
 
     async def _read_loop(self) -> None:
         """Background loop that processes incoming messages from the peer."""
@@ -180,28 +285,43 @@ class PeerConnection:
                     pass
 
                 elif msg_type == MSG_CHUNK_DATA:
-                    if self.pending_retrieve and not self.pending_retrieve.done():
-                        self.pending_retrieve.set_result(payload)
+                    if len(payload) < _CHUNK_ID_LEN:
+                        continue
+                    chunk_id = payload[:_CHUNK_ID_LEN].decode("utf-8")
+                    self._resolve("retrieve", chunk_id, payload[_CHUNK_ID_LEN:])
 
                 elif msg_type == MSG_CHUNK_NOT_FOUND:
-                    if self.pending_retrieve and not self.pending_retrieve.done():
-                        self.pending_retrieve.set_result(None)
+                    self._resolve("retrieve", payload.decode("utf-8"), None)
+
+                elif msg_type == MSG_STORE_OK:
+                    self._resolve("store", payload.decode("utf-8"), True)
+
+                elif msg_type == MSG_STORE_FAIL:
+                    self._resolve("store", payload.decode("utf-8"), False)
 
                 elif msg_type == MSG_STORE_CHUNK:
-                    if len(payload) < 64:
+                    if len(payload) < _CHUNK_ID_LEN:
                         continue
-                    chunk_id = payload[:64].decode("utf-8")
-                    chunk_data = payload[64:]
+                    chunk_id = payload[:_CHUNK_ID_LEN].decode("utf-8")
+                    chunk_data = payload[_CHUNK_ID_LEN:]
                     try:
                         self.node.chunk_store.store(chunk_id, chunk_data)
+                        await self.send_message(
+                            MSG_STORE_OK, chunk_id.encode("utf-8")
+                        )
                     except Exception as e:
                         logger.error(f"Failed to store chunk {chunk_id}: {e}")
+                        await self.send_message(
+                            MSG_STORE_FAIL, chunk_id.encode("utf-8")
+                        )
 
                 elif msg_type == MSG_RETRIEVE_CHUNK:
                     chunk_id = payload.decode("utf-8")
                     try:
                         chunk_data = self.node.chunk_store.retrieve(chunk_id)
-                        await self.send_message(MSG_CHUNK_DATA, chunk_data)
+                        await self.send_message(
+                            MSG_CHUNK_DATA, chunk_id.encode("utf-8") + chunk_data
+                        )
                     except ChunkNotFoundError:
                         await self.send_message(
                             MSG_CHUNK_NOT_FOUND, chunk_id.encode("utf-8")
@@ -212,15 +332,29 @@ class PeerConnection:
                             MSG_CHUNK_NOT_FOUND, chunk_id.encode("utf-8")
                         )
 
+                elif msg_type == MSG_HAS_CHUNK:
+                    chunk_id = payload.decode("utf-8")
+                    present = self.node.chunk_store.has(chunk_id)
+                    await self.send_message(
+                        MSG_HAS_CHUNK_RESP,
+                        chunk_id.encode("utf-8") + (b"\x01" if present else b"\x00"),
+                    )
+
+                elif msg_type == MSG_HAS_CHUNK_RESP:
+                    if len(payload) < _CHUNK_ID_LEN + 1:
+                        continue
+                    chunk_id = payload[:_CHUNK_ID_LEN].decode("utf-8")
+                    self._resolve(
+                        "has", chunk_id, payload[_CHUNK_ID_LEN] == 1
+                    )
+
                 elif msg_type == MSG_SYNC_MANIFEST:
                     try:
                         remote_entries_dicts = json.loads(payload.decode("utf-8"))
-                        from firecloud.manifest import FileEntry, ChunkInfo
-                        remote_entries = []
-                        for edict in remote_entries_dicts:
-                            d = dict(edict)
-                            chunks = [ChunkInfo(**ci) for ci in d.pop("chunks", [])]
-                            remote_entries.append(FileEntry(**d, chunks=chunks))
+                        from firecloud.manifest import entry_from_dict
+                        remote_entries = [
+                            entry_from_dict(edict) for edict in remote_entries_dicts
+                        ]
                         self.node.manifest.merge(remote_entries)
                     except Exception as e:
                         logger.error(f"Failed to merge remote manifest: {e}")
@@ -244,18 +378,28 @@ class PeerConnection:
             await self.close()
 
     async def close(self) -> None:
-        """Close the connection."""
+        """Close the connection (idempotent)."""
+        if self._closed:
+            return
+        self._closed = True
         self.read_task.cancel()
-        if self.pending_retrieve and not self.pending_retrieve.done():
-            self.pending_retrieve.set_exception(
-                TransportError("Connection closed while waiting for chunk retrieval")
-            )
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(
+                    TransportError("Connection closed while waiting for peer response")
+                )
+        self._pending.clear()
         try:
             self.writer.close()
             await asyncio.wait_for(self.writer.wait_closed(), timeout=0.5)
         except (Exception, asyncio.CancelledError):
             pass
-        self.node.on_connection_closed(self.peer_node_id)
+        # Only deregister if this object still owns the slot for the peer —
+        # a reconnect may already have replaced us in node.connections.
+        connections = getattr(self.node, "connections", None)
+        current = connections.get(self.peer_node_id) if connections is not None else None
+        if current is None or current is self:
+            self.node.on_connection_closed(self.peer_node_id)
 
 
 # ---------------------------------------------------------------------------
@@ -303,8 +447,11 @@ class NodeServer:
     ) -> None:
         """Handle an incoming connection from a peer."""
         try:
-            # Perform server handshake
-            msg_type, payload = await read_msg(reader)
+            # Perform server handshake — bounded so an idle or hostile
+            # client cannot hold the slot open indefinitely.
+            msg_type, payload = await asyncio.wait_for(
+                read_msg(reader), timeout=HANDSHAKE_TIMEOUT
+            )
             if msg_type != MSG_AUTH:
                 writer.close()
                 await writer.wait_closed()
@@ -318,7 +465,7 @@ class NodeServer:
             token = payload[:32]
             peer_node_id = payload[32:].decode("utf-8")
 
-            if token != self.node.network.auth_token:
+            if not hmac.compare_digest(token, self.node.network.auth_token):
                 writer.close()
                 await writer.wait_closed()
                 raise NodeAuthError("Peer authentication failed: invalid token")
@@ -363,7 +510,9 @@ class NodeClient:
             await write_msg(writer, MSG_AUTH, auth_payload)
 
             # Receive AUTH_OK
-            msg_type, payload = await read_msg(reader)
+            msg_type, payload = await asyncio.wait_for(
+                read_msg(reader), timeout=HANDSHAKE_TIMEOUT
+            )
             if msg_type != MSG_AUTH_OK:
                 writer.close()
                 await writer.wait_closed()

@@ -96,8 +96,20 @@ class Node:
         self._heartbeat_task: asyncio.Task | None = None
         self._manifest_sync_task: asyncio.Task | None = None
 
+        # One-shot background tasks (re-replication, stale-connection
+        # cleanup).  References are kept so they are neither garbage
+        # collected mid-flight nor leaked on shutdown.
+        self._bg_tasks: set[asyncio.Task] = set()
+
         # Running state
         self._running = False
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """Run a coroutine in the background, tracking the task."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -166,6 +178,13 @@ class Node:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+        # Cancel any in-flight background tasks (re-replication etc.)
+        for task in list(self._bg_tasks):
+            task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        self._bg_tasks.clear()
 
         # Close all peer connections
         for conn in list(self.connections.values()):
@@ -287,14 +306,22 @@ class Node:
 
         enc_key = self.network.encryption_key
 
-        # Retrieve encrypted chunks
+        # Retrieve encrypted chunks.  The strategy and FEC threshold come
+        # from the manifest entry — the file must be read back the way it
+        # was stored, regardless of how many peers are online right now.
         peer_ids = list(self.connections.keys())
         distributor = Distributor(
             peers=peer_ids,
             local_node_id=self.node_id,
             fec_enabled=entry.fec_enabled,
         )
-        encrypted_data_list = await distributor.retrieve(entry.chunks, self._client)
+        strategy = "erasure_coding" if entry.fec_enabled else "replication"
+        encrypted_data_list = await distributor.retrieve(
+            entry.chunks,
+            self._client,
+            strategy=strategy,
+            k=entry.chunk_count,
+        )
 
         # Decrypt and verify each chunk
         decrypted_chunks: list[Chunk] = []
@@ -363,6 +390,101 @@ class Node:
             for e in entries
         ]
 
+    async def verify_file(self, file_id: str) -> dict:
+        """Check availability and integrity of every chunk of a file.
+
+        Local chunks are integrity-checked (AEAD decryption for replicated
+        chunks, integrity hash for FEC shares); remote chunks are probed
+        for presence on connected peers without transferring data.
+
+        Returns a report dict with per-chunk locations and an overall
+        ``status`` of ``healthy``, ``degraded``, or ``unrecoverable``.
+
+        Raises:
+            firecloud.exceptions.FileNotFoundError: If the file is not in
+                the manifest or is tombstoned.
+        """
+        entry = self.manifest.get_file(file_id)
+        enc_key = self.network.encryption_key
+
+        chunk_reports: list[dict] = []
+        for info in entry.chunks:
+            locations: list[str] = []
+
+            if self.chunk_store.has(info.chunk_id):
+                data = self.chunk_store.retrieve(info.chunk_id)
+                if entry.fec_enabled:
+                    local_ok = compute_integrity_hash(data) == info.integrity_hash
+                else:
+                    try:
+                        decrypt_chunk(data, enc_key)
+                        local_ok = True
+                    except Exception:
+                        local_ok = False
+                if local_ok:
+                    locations.append(self.node_id)
+                else:
+                    logger.warning(
+                        f"Local chunk {info.chunk_id[:16]}... failed "
+                        "integrity verification"
+                    )
+
+            checked = {self.node_id}
+            for nid in list(info.stored_on) + list(self.connections.keys()):
+                if nid in checked:
+                    continue
+                checked.add(nid)
+                conn = self.connections.get(nid)
+                if conn and await conn.has_chunk(info.chunk_id):
+                    locations.append(nid)
+
+            chunk_reports.append({
+                "chunk_id": info.chunk_id,
+                "index": info.index,
+                "locations": locations,
+            })
+
+        total = len(chunk_reports)
+        available = sum(1 for c in chunk_reports if c["locations"])
+
+        if entry.fec_enabled:
+            # chunk_count is the reconstruction threshold K; entry.chunks
+            # holds all N shares.
+            k = entry.chunk_count
+            if available >= total:
+                status = "healthy"
+            elif available >= k:
+                status = "degraded"
+            else:
+                status = "unrecoverable"
+        else:
+            min_replicas = min(
+                (len(c["locations"]) for c in chunk_reports), default=0
+            )
+            if available < total:
+                status = "unrecoverable"
+            elif min_replicas >= entry.replication_factor:
+                status = "healthy"
+            else:
+                status = "degraded"
+
+        return {
+            "file_id": file_id,
+            "name": entry.name,
+            "strategy": "erasure_coding" if entry.fec_enabled else "replication",
+            "total_chunks": total,
+            "available_chunks": available,
+            "status": status,
+            "chunks": chunk_reports,
+        }
+
+    async def verify_all(self) -> list[dict]:
+        """Run :meth:`verify_file` for every live file in the manifest."""
+        reports = []
+        for entry in self.manifest.list_files():
+            reports.append(await self.verify_file(entry.file_id))
+        return reports
+
     # ------------------------------------------------------------------
     # Networking
     # ------------------------------------------------------------------
@@ -414,7 +536,13 @@ class Node:
 
     def register_connection(self, peer_node_id: str, conn: PeerConnection) -> None:
         """Register an active peer connection (called by transport)."""
+        old = self.connections.get(peer_node_id)
         self.connections[peer_node_id] = conn
+        if old is not None and old is not conn:
+            # A reconnect superseded the previous connection — close the
+            # stale one.  Its close() sees it no longer owns the slot and
+            # will not deregister the new connection.
+            self._spawn(old.close())
         logger.debug(f"Registered connection with peer {peer_node_id}")
 
     def on_connection_closed(self, peer_node_id: str) -> None:
@@ -422,7 +550,7 @@ class Node:
         self.connections.pop(peer_node_id, None)
         logger.debug(f"Connection with peer {peer_node_id} closed")
         if self._running:
-            asyncio.create_task(self._rereplicate_peer_chunks(peer_node_id))
+            self._spawn(self._rereplicate_peer_chunks(peer_node_id))
 
     async def remove_node(self, node_id: str) -> None:
         """Explicitly remove a node from the network and trigger re-replication.
@@ -441,7 +569,6 @@ class Node:
 
     async def _rereplicate_peer_chunks(self, offline_node_id: str) -> None:
         """Scan manifest for chunks stored on the offline node and re-replicate them."""
-        from firecloud.transport import MSG_STORE_CHUNK
         active_peers = [pid for pid in self.connections.keys() if pid != offline_node_id]
         if not active_peers:
             logger.info("No active peers available for re-replication.")
@@ -480,19 +607,25 @@ class Node:
                                         break
 
                         if chunk_data is not None:
+                            stored = False
                             try:
                                 if candidate == self.node_id:
                                     self.chunk_store.store(chunk_info.chunk_id, chunk_data)
+                                    stored = True
                                 else:
                                     conn = self.connections.get(candidate)
                                     if conn:
-                                        payload = chunk_info.chunk_id.encode("utf-8") + chunk_data
-                                        await conn.send_message(MSG_STORE_CHUNK, payload)
+                                        stored = await conn.store_chunk(chunk_info.chunk_id, chunk_data)
+                            except Exception as exc:
+                                logger.warning(f"Failed to re-replicate chunk {chunk_info.chunk_id} to {candidate}: {exc}")
+                            if stored:
                                 chunk_info.stored_on.append(candidate)
                                 updated = True
                                 logger.info(f"Re-replicated chunk {chunk_info.chunk_id[:16]}... to {candidate}")
-                            except Exception as exc:
-                                logger.warning(f"Failed to re-replicate chunk {chunk_info.chunk_id} to {candidate}: {exc}")
+                            else:
+                                # Candidate selection would re-pick this node
+                                # forever — give up on this chunk for now.
+                                break
                         else:
                             break
 

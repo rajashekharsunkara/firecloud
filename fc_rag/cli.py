@@ -36,14 +36,12 @@ def index(path: str):
 def query(question: str):
     """Query the local RAG pipeline with a natural-language question."""
     from fc_rag.query_engine import query as run_query
-    from fc_rag.retriever import retrieve
 
-    answer = run_query(question)
-    click.echo(answer)
+    response = run_query(question)
+    click.echo(response.answer)
 
-    results = retrieve(question)
-    if results:
-        sources = sorted(set(r.filename for r in results))
+    if response.sources:
+        sources = sorted(set(r.filename for r in response.sources))
         click.echo(f"\nSources: {', '.join(sources)}")
 
 
