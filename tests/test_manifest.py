@@ -82,7 +82,7 @@ class TestTombstone:
         m = Manifest(tmp_dir)
         m.add_file(_make_entry())
         m.delete_file("file-001")
-        # Entry is tombstoned — listing with include_deleted shows it.
+        # The entry is tombstoned; listing with include_deleted shows it.
         all_entries = m.list_files(include_deleted=True)
         assert any(e.file_id == "file-001" and e.deleted for e in all_entries)
 
@@ -138,8 +138,8 @@ class TestLamportClock:
 
     def test_clock_increments_on_delete(self, tmp_dir):
         m = Manifest(tmp_dir)
-        m.add_file(_make_entry(file_id="a"))  # clock → 1
-        m.delete_file("a")  # clock → 2
+        m.add_file(_make_entry(file_id="a"))  # clock 1
+        m.delete_file("a")  # clock 2
         assert m._clock == 2
 
     def test_increment_clock_standalone(self, tmp_dir):

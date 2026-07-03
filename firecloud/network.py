@@ -1,8 +1,5 @@
-"""FireCloud Network Key Management.
-
-Handles network key generation, loading/saving passphrase-wrapped keystores,
-and accessing derived sub-keys for encryption, HMAC, and authentication.
-"""
+"""Network key handling: create/load/save the passphrase-wrapped keystore
+and derive the per-purpose sub-keys."""
 
 import hashlib
 from pathlib import Path
@@ -18,54 +15,34 @@ from firecloud.crypto import (
 
 
 class Network:
-    """Manages the network-wide key and derives sub-keys.
+    """The network-wide key plus the sub-keys derived from it.
 
-    The network key is protected on disk using a passphrase-derived key.
+    Holding the key is what makes a node part of the network; the keystore
+    file wraps it under a passphrase for storage.
     """
 
     def __init__(self, key: bytes, passphrase: str | None = None) -> None:
-        """Initialize the network with a key.
-
-        Args:
-            key: The 32-byte network key.
-            passphrase: Optional passphrase associated with this network key.
-        """
         self.key = key
         self.passphrase = passphrase
-        # network_id is the first 8 bytes of SHA-256 of the network key, hex-encoded
+        # First 8 bytes of SHA-256(key), hex. Safe to show in logs.
         self.network_id = hashlib.sha256(key).digest()[:8].hex()
 
     @classmethod
     def create(cls, passphrase: str) -> "Network":
-        """Create a new network with a fresh cryptographically random key.
-
-        Args:
-            passphrase: The passphrase to protect the new network key.
-        """
+        """New network with a fresh random key."""
         key = generate_network_key()
         return cls(key, passphrase)
 
     @classmethod
     def load(cls, path: Path | str, passphrase: str) -> "Network":
-        """Load a network key from a passphrase-protected keystore file.
-
-        Args:
-            path: Path to the keystore file.
-            passphrase: Passphrase to decrypt the keystore.
-        """
+        """Load and unwrap a keystore file."""
         path = Path(path)
         encrypted_key = path.read_bytes()
         key = decrypt_keystore(encrypted_key, passphrase)
         return cls(key, passphrase)
 
     def save(self, path: Path | str, passphrase: str | None = None) -> None:
-        """Save the network key to a passphrase-protected keystore file.
-
-        Args:
-            path: Path to write the keystore file.
-            passphrase: Optional passphrase to use. Defaults to the passphrase
-                associated with this instance if not provided.
-        """
+        """Write the keystore, wrapped under the given (or stored) passphrase."""
         path = Path(path)
         enc_pass = passphrase or self.passphrase
         if not enc_pass:

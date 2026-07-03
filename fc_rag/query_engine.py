@@ -1,4 +1,4 @@
-"""RAG pipeline: retrieve context → build prompt → query Ollama."""
+"""RAG pipeline: retrieval, prompt assembly, and the Ollama call."""
 
 import json
 import sys
@@ -63,7 +63,9 @@ def query(user_question: str) -> QueryResponse:
             answer = response["message"]["content"]
             success = True
             break
-        except (ollama.ResponseError, ConnectionError) as exc:
+        except Exception as exc:
+            # An LLM outage must not crash the pipeline; the retrieved
+            # sources are still useful and get returned regardless.
             print(
                 f"[attempt {attempt}/{settings.max_retries}] Ollama error: {exc}",
                 file=sys.stderr,
@@ -72,7 +74,12 @@ def query(user_question: str) -> QueryResponse:
                 time.sleep(2)
 
     if not success:
-        answer = "Local LLM unavailable. Start Ollama with: ollama serve"
+        answer = (
+            f"Local LLM unavailable (model '{settings.ollama_model}'). "
+            "Start Ollama and pull the model, e.g.:\n"
+            f"  ollama serve  &&  ollama pull {settings.ollama_model}\n"
+            "The retrieved sources below are still valid."
+        )
 
     elapsed_ms = (time.monotonic() - start) * 1000
 

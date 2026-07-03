@@ -1,6 +1,7 @@
-"""Tests for firecloud.cli — click CLI commands."""
+"""Tests for the click-based firecloud CLI."""
 
 import os
+from importlib.metadata import version
 from unittest.mock import patch
 
 import pytest
@@ -37,7 +38,7 @@ class TestHelpAndVersion:
     def test_version(self, runner):
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert version("firecloud-devnet") in result.output
 
     def test_init_help(self, runner):
         result = runner.invoke(cli, ["init", "--help"])

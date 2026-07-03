@@ -24,7 +24,7 @@ CHUNK_DATA = b"encrypted-chunk-payload-" * 10  # 240 bytes
 
 
 class TestStoreRetrieve:
-    """Store → retrieve round-trip tests."""
+    """Store/retrieve round-trip tests."""
 
     def test_store_and_retrieve(self, storage_dir):
         store = ChunkStore(storage_dir)

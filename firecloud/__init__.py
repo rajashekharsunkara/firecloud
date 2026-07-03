@@ -1,5 +1,4 @@
-"""
-FireCloud — Private, encrypted, distributed storage across your own machines.
+"""Private, encrypted, distributed storage across your own machines.
 
 Usage:
     from firecloud import Node, Network
@@ -9,7 +8,7 @@ Usage:
     node.start()
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"
 
 from firecloud.network import Network
 from firecloud.node import Node

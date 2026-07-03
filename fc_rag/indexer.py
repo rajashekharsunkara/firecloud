@@ -34,8 +34,8 @@ def _ensure_collection(client: QdrantClient, name: str) -> None:
 
 
 def _safety_check(path: Path) -> None:
-    # block indexing of firecloud's encrypted chunk storage — those are
-    # ciphertext and would just pollute the vector store with garbage
+    # Refuse to index firecloud's encrypted chunk storage; it's ciphertext
+    # and would just pollute the vector store.
     resolved = path.resolve()
     parts = resolved.parts
 
@@ -123,9 +123,8 @@ def index_path(path: Path) -> int:
 
             points = [
                 PointStruct(
-                    # Deterministic ID per (file, chunk position) — an
-                    # upsert of the same file overwrites instead of
-                    # duplicating.
+                    # Deterministic ID per (file, chunk position) so
+                    # re-indexing a file overwrites instead of duplicating.
                     id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{filepath}::{i}")),
                     vector=vec,
                     payload={

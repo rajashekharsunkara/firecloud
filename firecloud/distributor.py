@@ -1,8 +1,8 @@
-"""FireCloud Distributor Engine.
+"""Chunk placement and retrieval.
 
-Decides the placement of chunks (local, replicated, or erasure coded)
-based on the network peer count, and retrieves them, performing
-erasure coding reconstruction if nodes are offline.
+Picks a strategy (local, replicated, or erasure coded) from the node count,
+stores chunks accordingly, and reconstructs on the way back if nodes are
+offline.
 """
 
 import logging
@@ -18,6 +18,10 @@ logger = logging.getLogger("firecloud.distributor")
 # Replicated chunks are stored on this many nodes.
 REPLICATION_FACTOR = 2
 
+# zfec refuses more than 256 blocks. K only controls how the payload is
+# split, so cap it: ceil(1.5 * 170) = 255 fits, 171 would not.
+_MAX_FEC_K = 170
+
 
 class Distributor:
     """Orchestrates chunk distribution and retrieval strategies."""
@@ -28,19 +32,30 @@ class Distributor:
         local_node_id: str,
         fec_enabled: bool = True,
         fec_threshold: int = 5,
+        store_local: bool = True,
     ) -> None:
-        """Initialize the distributor.
+        """store_local=False means this node is not a storage target itself.
 
-        Args:
-            peers: List of active peer node IDs.
-            local_node_id: The ID of this local node.
-            fec_enabled: Whether FEC is allowed.
-            fec_threshold: The node count threshold to use FEC.
+        One-shot CLI clients use that so chunks land on the durable peers;
+        anything kept locally would vanish when the command exits.
         """
         self.peers = peers
         self.local_node_id = local_node_id
         self.fec_enabled = fec_enabled
         self.fec_threshold = fec_threshold
+        self.store_local = store_local
+
+    def _placement_nodes(self) -> list[str]:
+        """Nodes eligible to hold chunks, in preference order.
+
+        With store_local=False chunks go to peers only. If there are no
+        peers at all, the local store is still the last resort.
+        """
+        if self.store_local:
+            return [self.local_node_id] + self.peers
+        if self.peers:
+            return list(self.peers)
+        return [self.local_node_id]
 
     def get_strategy(self) -> str:
         """Determine the distribution strategy based on the node count."""
@@ -74,9 +89,8 @@ class Distributor:
     ) -> list[str]:
         """Store *copies* replicas, preferring *preferred* nodes.
 
-        Falls back to any other known node when a preferred target fails,
-        and raises :class:`InsufficientPeersError` when no node at all
-        accepted the chunk.
+        Falls back to any other node when a preferred target fails. Raises
+        InsufficientPeersError if nobody accepted the chunk.
         """
         candidates = preferred + [n for n in all_nodes if n not in preferred]
         stored_on: list[str] = []
@@ -96,14 +110,9 @@ class Distributor:
         return stored_on
 
     async def distribute(self, chunks: list, transport) -> list[ChunkInfo]:
-        """Distribute chunks across peers. Returns placement info.
-
-        Args:
-            chunks: List of Chunk objects containing encrypted data.
-            transport: The transport client/manager containing connections.
-        """
+        """Place encrypted chunks on the network; returns placement info."""
         strategy = self.get_strategy()
-        all_nodes = [self.local_node_id] + self.peers
+        all_nodes = self._placement_nodes()
 
         if strategy == "local":
             chunk_infos = []
@@ -145,19 +154,20 @@ class Distributor:
             return chunk_infos
 
         else:
-            # erasure_coding strategy
-            k = len(chunks)
-            if k == 0:
+            num_chunks = len(chunks)
+            if num_chunks == 0:
                 return []
+            # K capped so N stays under zfec's block limit on big files.
+            k = min(num_chunks, _MAX_FEC_K)
             n = fec.compute_n(k)
 
-            # Prepend a header containing the chunk count and each chunk's size
-            header = struct.pack("!I", k) + b"".join(
+            # Header records the chunk count and sizes so the decoded
+            # payload can be split back into the original chunks.
+            header = struct.pack("!I", num_chunks) + b"".join(
                 struct.pack("!I", len(c.data)) for c in chunks
             )
             payload = header + b"".join(c.data for c in chunks)
 
-            # Encode into N shares
             shares = fec.encode(payload, k, n)
 
             chunk_infos = []
@@ -192,21 +202,13 @@ class Distributor:
         strategy: str | None = None,
         k: int | None = None,
     ) -> list[bytes]:
-        """Retrieve chunks from peers, with FEC reconstruction if needed.
+        """Retrieve chunks from peers, reconstructing via FEC if needed.
 
-        Args:
-            chunk_infos: List of ChunkInfo objects representing the placement of
-                chunks or shares.
-            transport: The transport client/manager containing connections.
-            strategy: The strategy the file was *stored* with.  Callers should
-                pass this from the manifest entry — deriving it from the live
-                peer count would mis-read erasure-coded shares as replicated
-                chunks (or vice versa) whenever the cluster has grown or
-                shrunk since upload.  ``None`` falls back to the current
-                placement strategy for backward compatibility.
-            k: The erasure-coding reconstruction threshold recorded at upload
-                (the file's original chunk count).  Inferred from the share
-                count when ``None``.
+        *strategy* should come from the manifest entry (how the file was
+        stored). Deriving it from the live peer count would misread FEC
+        shares as replicated chunks, or vice versa, once the cluster has
+        grown or shrunk since upload. *k* is the FEC threshold; None means
+        infer it from the share count.
         """
         if strategy is None:
             strategy = self.get_strategy()
@@ -252,13 +254,13 @@ class Distributor:
             return chunks_data
 
         else:
-            # erasure_coding strategy: chunk_infos are the N shares.
+            # chunk_infos are the N erasure-coded shares here.
             n = len(chunk_infos)
             if n == 0:
                 return []
             if k is None:
-                # Invert compute_n: the smallest K whose share count
-                # reaches N (exact for every N this codebase produces).
+                # Smallest K whose share count reaches N. Exact inverse of
+                # compute_n for every N we produce.
                 k = 1
                 while fec.compute_n(k) < n:
                     k += 1
@@ -293,8 +295,8 @@ class Distributor:
                         if share_data:
                             break
 
-                # A corrupt share would poison the whole reconstruction —
-                # verify and treat mismatches as missing instead.
+                # A corrupt share poisons the whole reconstruction, so
+                # treat a hash mismatch as a miss.
                 if share_data is not None:
                     if compute_integrity_hash(share_data) != info.integrity_hash:
                         logger.warning(
@@ -313,10 +315,8 @@ class Distributor:
                     f"Insufficient shares to reconstruct file: need {k}, got {len(retrieved_shares)}"
                 )
 
-            # Reconstruct original payload
             payload = fec.decode(retrieved_shares, k)
 
-            # Parse header
             num_chunks = struct.unpack("!I", payload[:4])[0]
             sizes = []
             offset = 4
@@ -326,7 +326,6 @@ class Distributor:
                 )
                 offset += 4
 
-            # Split payload into original encrypted chunks
             chunks_data = []
             for size in sizes:
                 chunks_data.append(payload[offset : offset + size])

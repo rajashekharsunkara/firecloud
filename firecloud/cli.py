@@ -1,23 +1,24 @@
-"""FireCloud CLI — click-based command-line interface.
-
-Provides commands to initialise a network, start/stop a node,
-upload/download/delete files, list files and peers, connect to
-peers, and sync a folder.
-"""
+"""Command-line interface."""
 
 import asyncio
 import os
 import signal
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import click
 
 from firecloud.network import Network
 from firecloud.exceptions import FireCloudError
-# Default configuration directory
+
 _DEFAULT_DIR = Path.home() / ".firecloud"
 _KEYSTORE_FILE = "network.key"
 _PID_FILE = "firecloud.pid"
+
+try:
+    _VERSION = version("firecloud-devnet")
+except PackageNotFoundError:
+    _VERSION = "0.0.0"
 def _config_dir() -> Path:
     """Return (and create) the config directory."""
     d = _DEFAULT_DIR
@@ -36,7 +37,7 @@ def _load_network(passphrase: str) -> Network:
         raise click.ClickException(f"Failed to load network: {exc}") from exc
 
 def _storage_path(storage: str | None) -> Path:
-    """Resolve the storage directory: CLI flag → FIRECLOUD_DATA_DIR → default."""
+    """Resolve the storage dir: CLI flag first, then FIRECLOUD_DATA_DIR, then default."""
     if storage:
         return Path(storage)
     env_dir = os.environ.get("FIRECLOUD_DATA_DIR")
@@ -57,14 +58,19 @@ def _max_storage_bytes() -> int | None:
         )
 
 async def _connect_bootstrap(node, bootstrap: str | None) -> None:
-    """Connect to an explicitly given bootstrap peer, warning on failure."""
+    """Join the network via a bootstrap peer; warn instead of failing.
+
+    Node.join() reaches the whole cluster from this one address. Without
+    the fan-out an uploader never sees enough nodes for erasure coding and
+    a downloader never learns the file catalog.
+    """
     if not bootstrap:
         return
     try:
-        await node.connect(bootstrap)
+        await node.join(bootstrap)
     except Exception as exc:
         click.echo(
-            click.style(f"⚠  Could not reach bootstrap {bootstrap}: {exc}", fg="yellow")
+            click.style(f"⚠  Could not join via {bootstrap}: {exc}", fg="yellow")
         )
 
 def _human_size(num_bytes: int) -> str:
@@ -75,23 +81,22 @@ def _human_size(num_bytes: int) -> str:
         num_bytes /= 1024
     return f"{num_bytes:.1f} PB"
 @click.group()
-@click.version_option(version="0.1.0", prog_name="firecloud")
+@click.version_option(version=_VERSION, prog_name="firecloud")
 def cli():
-    """FireCloud — Private, encrypted, distributed storage."""
+    """Private, encrypted, distributed storage."""
     pass
 @cli.command()
 @click.option("--join", "join_addr", default=None, help="Join an existing network via peer address (host:port).")
-@click.option("--passphrase", prompt=True, hide_input=True, confirmation_prompt=True, help="Passphrase to protect the network key.")
+@click.option("--passphrase", prompt=True, hide_input=True, confirmation_prompt=True, envvar="FIRECLOUD_PASSPHRASE", help="Passphrase to protect the network key (or set FIRECLOUD_PASSPHRASE).")
 def init(join_addr: str | None, passphrase: str):
     """Initialise a new FireCloud network or join an existing one."""
     cfg = _config_dir()
     keystore = cfg / _KEYSTORE_FILE
 
     if join_addr:
-        # Join mode: connect to peer and get network key
         click.echo(f"Joining network via {join_addr}...")
-        # For v1, joining requires the same passphrase — the peer shares the
-        # keystore file out-of-band.  We simply create the config directory.
+        # Key exchange is out of band: the operator copies network.key
+        # from an existing node.
         click.echo(
             click.style("⚠  Copy the network.key file from an existing node to:", fg="yellow")
         )
@@ -174,12 +179,12 @@ def _start_daemon(net: Network, storage_path: Path, port: int, bootstrap: str | 
         raise click.ClickException("--daemon is not supported on this platform (no os.fork).")
 
     if child_pid > 0:
-        # Parent — write PID and exit
+        # parent: record the child PID and exit
         pid_file.write_text(str(child_pid))
         click.echo(click.style(f"✓ Node daemonised (PID {child_pid}).", fg="green"))
         return
 
-    # Child — detach and run
+    # child: detach from the terminal and run
     os.setsid()
     _start_foreground(net, storage_path, port, bootstrap)
 @cli.command()
@@ -228,7 +233,7 @@ def status(passphrase: str, port: int, storage: str | None):
 @cli.command()
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
-@click.option("--port", default=7474, type=int)
+@click.option("--port", default=0, type=int, help="Local port (0 = pick a free one; avoids clashing with a running node).")
 @click.option("--storage", default=None, type=click.Path())
 @click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
 def upload(path: str, passphrase: str, port: int, storage: str | None, bootstrap: str | None):
@@ -239,8 +244,10 @@ def upload(path: str, passphrase: str, port: int, storage: str | None, bootstrap
     from firecloud.node import Node
 
     async def _run():
+        # Shares stay off this node: it exits as soon as the command is done.
         node = Node(network=net, storage_path=storage_path, port=port,
-                     max_storage=_max_storage_bytes(), enable_discovery=False)
+                     max_storage=_max_storage_bytes(), enable_discovery=False,
+                     store_local=False)
         await node.start()
         try:
             await _connect_bootstrap(node, bootstrap)
@@ -257,7 +264,7 @@ def upload(path: str, passphrase: str, port: int, storage: str | None, bootstrap
 @click.argument("file_id")
 @click.argument("output", type=click.Path())
 @click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
-@click.option("--port", default=7474, type=int)
+@click.option("--port", default=0, type=int, help="Local port (0 = pick a free one; avoids clashing with a running node).")
 @click.option("--storage", default=None, type=click.Path())
 @click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
 def download(file_id: str, output: str, passphrase: str, port: int, storage: str | None, bootstrap: str | None):
@@ -284,7 +291,7 @@ def download(file_id: str, output: str, passphrase: str, port: int, storage: str
 @cli.command("delete")
 @click.argument("file_id")
 @click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
-@click.option("--port", default=7474, type=int)
+@click.option("--port", default=0, type=int, help="Local port (0 = pick a free one; avoids clashing with a running node).")
 @click.option("--storage", default=None, type=click.Path())
 @click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
 def delete_file(file_id: str, passphrase: str, port: int, storage: str | None, bootstrap: str | None):
@@ -308,13 +315,17 @@ def delete_file(file_id: str, passphrase: str, port: int, storage: str | None, b
             await node.stop()
 
     asyncio.run(_run())
-# list
 @cli.command("list")
 @click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
-@click.option("--port", default=7474, type=int)
+@click.option("--port", default=0, type=int, help="Local port (0 = pick a free one; avoids clashing with a running node).")
 @click.option("--storage", default=None, type=click.Path())
-def list_files(passphrase: str, port: int, storage: str | None):
-    """List all files stored in the FireCloud network."""
+@click.option("--bootstrap", default=None, help="Peer address (host:port) to pull the catalog from.")
+def list_files(passphrase: str, port: int, storage: str | None, bootstrap: str | None):
+    """List files stored in the network.
+
+    With --bootstrap this pulls the catalog from the cluster first, so files
+    uploaded elsewhere show up. Without it only the local manifest is shown.
+    """
     net = _load_network(passphrase)
     storage_path = _storage_path(storage)
 
@@ -323,7 +334,15 @@ def list_files(passphrase: str, port: int, storage: str | None):
     async def _run():
         node = Node(network=net, storage_path=storage_path, port=port,
                      max_storage=_max_storage_bytes(), enable_discovery=False)
-        files = node.list_files()
+        if bootstrap:
+            await node.start()
+            try:
+                await _connect_bootstrap(node, bootstrap)
+                files = node.list_files()
+            finally:
+                await node.stop()
+        else:
+            files = node.list_files()
         if not files:
             click.echo("No files stored.")
             return
@@ -350,7 +369,7 @@ def list_files(passphrase: str, port: int, storage: str | None):
 @cli.command()
 @click.argument("file_id", required=False, default=None)
 @click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
-@click.option("--port", default=7474, type=int)
+@click.option("--port", default=0, type=int, help="Local port (0 = pick a free one; avoids clashing with a running node).")
 @click.option("--storage", default=None, type=click.Path())
 @click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")
 def verify(file_id: str | None, passphrase: str, port: int, storage: str | None, bootstrap: str | None):
@@ -498,7 +517,7 @@ def remove_node(node_id: str, passphrase: str, port: int, storage: str | None):
 @cli.command()
 @click.argument("folder", type=click.Path())
 @click.option("--passphrase", prompt=True, hide_input=True, envvar="FIRECLOUD_PASSPHRASE", help="Network passphrase (or set FIRECLOUD_PASSPHRASE).")
-@click.option("--port", default=7474, type=int)
+@click.option("--port", default=0, type=int, help="Local port (0 = pick a free one; avoids clashing with a running node).")
 @click.option("--storage", default=None, type=click.Path())
 @click.option("--daemon", is_flag=True, help="Run in the background (Unix only).")
 @click.option("--bootstrap", default=None, help="Peer address (host:port) to connect to first.")

@@ -1,4 +1,4 @@
-"""fc-rag CLI — index files and query the local RAG pipeline."""
+"""CLI to index files and query the local RAG pipeline."""
 
 from pathlib import Path
 import click
@@ -6,7 +6,7 @@ import click
 
 @click.group()
 def cli():
-    """fc-rag — Private RAG pipeline for FireCloud docs."""
+    """Private RAG pipeline for FireCloud docs."""
     pass
 
 

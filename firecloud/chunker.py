@@ -1,8 +1,4 @@
-"""FireCloud Chunker Engine.
-
-Wraps FastCDC for content-defined chunking with keyed chunk addressing
-and integrity verification.
-"""
+"""Content-defined chunking via FastCDC, with keyed chunk addressing."""
 
 from dataclasses import dataclass
 import hashlib
@@ -15,7 +11,7 @@ from firecloud.crypto import derive_chunk_id, compute_integrity_hash
 
 @dataclass
 class Chunk:
-    """Represents a content-defined chunk of a file."""
+    """One content-defined chunk of a file."""
     index: int
     offset: int
     length: int
@@ -38,9 +34,8 @@ def chunk_file(
     path = Path(filepath)
     if not path.exists() or path.stat().st_size == 0:
         return []
-        
-    # fastcdc expects string filepath or bytes.
-    # We use fat=True so that c.data contains the actual chunk bytes.
+
+    # fat=True makes fastcdc include the chunk bytes, not just offsets.
     cdc_chunks = fastcdc(
         str(path),
         min_size=min_size,

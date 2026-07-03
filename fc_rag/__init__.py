@@ -1,3 +1,3 @@
-"""Private RAG pipeline for FireCloud — all processing runs locally."""
+"""Private RAG pipeline for FireCloud. All processing stays on the machine."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"

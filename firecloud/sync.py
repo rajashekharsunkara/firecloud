@@ -1,9 +1,8 @@
-"""FireCloud Folder Sync — watchdog-based bi-directional folder synchronization.
+"""Two-way folder sync.
 
-Uses :pypi:`watchdog` to monitor a local folder for file changes and
-automatically uploads / deletes files through the :class:`~firecloud.node.Node`.
-Incoming files from remote peers are downloaded periodically by comparing the
-manifest against the sync folder contents.
+watchdog watches the folder and pushes local changes through the node;
+a periodic loop compares the manifest against the folder and pulls down
+files uploaded elsewhere.
 """
 
 import asyncio
@@ -21,9 +20,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("firecloud.sync")
 
-# Debounce window — how long (in seconds) to wait after the last filesystem
-# event before processing the change.  This handles editors that do
-# write-to-temp-then-rename.
+# Wait this long after the last filesystem event before acting on it.
+# Editors that write-to-temp-then-rename fire several events per save.
 _DEBOUNCE_SECONDS = 0.5
 
 
@@ -54,12 +52,10 @@ class _SyncEventHandler(FileSystemEventHandler):
 
 
 class FolderSync:
-    """Watches a folder and syncs its contents through a FireCloud node.
+    """Watches a folder and syncs it through a node.
 
-    - **Outbound:** local file changes (create / modify / delete) are uploaded
-      or tombstoned via the node.
-    - **Inbound:** new files in the manifest that are missing from the local
-      folder are downloaded periodically.
+    Outbound: local creates/modifies/deletes are uploaded or tombstoned.
+    Inbound: manifest files missing locally get downloaded periodically.
     """
 
     def __init__(self, node: "Node", folder: Path | str) -> None:
@@ -72,15 +68,15 @@ class FolderSync:
         self._incoming_task: asyncio.Task | None = None
         self._debounce_task: asyncio.Task | None = None
 
-        # Pending events: path → (event_type, timestamp)
+        # Pending events: path -> (event_type, timestamp)
         self._pending: dict[str, tuple[str, float]] = {}
         self._pending_lock = threading.Lock()
 
-        # Track file_id ↔ filename mappings for delete propagation
+        # file_id/filename mappings, needed to propagate deletes
         self._name_to_id: dict[str, str] = {}
         self._id_to_name: dict[str, str] = {}
 
-        # Files we are currently downloading — skip outbound re-upload
+        # Files mid-download; watchdog events for them must not re-upload.
         self._downloading: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -92,7 +88,6 @@ class FolderSync:
         if self._running:
             return
 
-        # Seed name ↔ id mapping from existing manifest
         self._rebuild_name_map()
 
         self._running = True
@@ -101,10 +96,7 @@ class FolderSync:
         self._observer.schedule(handler, str(self.folder), recursive=False)
         self._observer.start()
 
-        # Background task to check for incoming files every 5 seconds
         self._incoming_task = asyncio.create_task(self._incoming_loop())
-
-        # Background task to process debounced events
         self._debounce_task = asyncio.create_task(self._debounce_loop())
 
         logger.info(f"Folder sync started for {self.folder}")
@@ -136,7 +128,6 @@ class FolderSync:
 
     def _schedule_event(self, event_type: str, path: str) -> None:
         """Record a filesystem event for debounced processing."""
-        # Skip files we are downloading ourselves
         filename = Path(path).name
         if filename in self._downloading:
             return
@@ -181,7 +172,7 @@ class FolderSync:
                 file_id = await self.node.upload(filepath)
                 self._name_to_id[filename] = file_id
                 self._id_to_name[file_id] = filename
-                logger.debug(f"Sync uploaded {filename} → {file_id}")
+                logger.debug(f"Sync uploaded {filename} as {file_id}")
 
         elif event_type == "deleted":
             file_id = self._name_to_id.get(filename)
@@ -211,8 +202,8 @@ class FolderSync:
             pass
 
     async def _pull_incoming(self) -> None:
-        """Download any manifest files that are not present locally or are newer on remote."""
-        # Group entries by filename and find the one with the highest Lamport timestamp
+        """Download manifest files that are missing locally or newer remotely."""
+        # Per filename, keep the entry with the highest Lamport timestamp.
         latest_entries = {}
         for entry in self.node.manifest.list_files():
             filename = entry.name
@@ -223,14 +214,14 @@ class FolderSync:
         for filename, entry in latest_entries.items():
             local_path = self.folder / filename
 
-            # If the file exists locally and we already have this file_id mapped, it is up to date
+            # Local copy already maps to this file_id: up to date.
             mapped_id = self._name_to_id.get(filename)
             if local_path.exists() and mapped_id == entry.file_id:
                 continue
 
-            # If the file exists locally but corresponds to a different file_id
+            # Local copy maps to a different file_id; only replace it if
+            # the remote entry is actually newer.
             if local_path.exists() and mapped_id is not None:
-                # If the remote version is not newer than our locally mapped version, skip it
                 try:
                     local_entry = self.node.manifest.get_file(mapped_id)
                     if entry.lamport_ts <= local_entry.lamport_ts:
@@ -238,15 +229,12 @@ class FolderSync:
                 except Exception:
                     pass
 
-            # Skip if we are currently downloading this file
             if filename in self._downloading:
                 continue
 
-            # Already tracked by us (skip if it has been tombstoned / deleted)
             if entry.file_id in self._id_to_name and entry.deleted:
                 continue
 
-            # Download from the network
             try:
                 self._downloading.add(filename)
                 await self.node.download(entry.file_id, local_path)
@@ -263,10 +251,10 @@ class FolderSync:
     # ------------------------------------------------------------------
 
     def _rebuild_name_map(self) -> None:
-        """Populate the name ↔ id mapping from the current manifest.
+        """Seed the name/id mapping from the manifest.
 
-        Only includes files that actually exist in the sync folder, so that
-        files uploaded by remote peers can be downloaded on first sync start.
+        Only files that exist in the folder are mapped; anything else stays
+        eligible for the first inbound pull.
         """
         self._name_to_id.clear()
         self._id_to_name.clear()

@@ -1,9 +1,5 @@
-"""FireCloud Node — orchestrates storage, transport, discovery, and sync.
-
-The :class:`Node` is the primary user-facing object.  It wires together
-the chunk store, manifest, transport layer, mDNS discovery, and
-distributor so that files can be uploaded, downloaded, deleted, and
-synced across the LAN with a single method call.
+"""The Node ties the subsystems together: chunk store, manifest, transport,
+discovery, and the distributor. Upload/download/delete/verify all live here.
 """
 
 import asyncio
@@ -32,15 +28,11 @@ logger = logging.getLogger("firecloud.node")
 
 
 class Node:
-    """Main FireCloud node that orchestrates all operations.
+    """A single FireCloud node.
 
-    Ties together:
-    - :class:`~firecloud.storage.ChunkStore` for local chunk persistence
-    - :class:`~firecloud.manifest.Manifest` for file metadata
-    - :class:`~firecloud.transport.NodeServer` / :class:`~firecloud.transport.NodeClient`
-      for peer-to-peer communication
-    - :class:`~firecloud.discovery.LANDiscovery` for mDNS peer discovery
-    - :class:`~firecloud.distributor.Distributor` for chunk placement
+    store_local=False marks this node as a transient client (one-shot CLI
+    command): it distributes chunks to peers but keeps none itself, since
+    it goes away when the command finishes.
     """
 
     def __init__(
@@ -52,56 +44,38 @@ class Node:
         host: str = "0.0.0.0",
         node_id: str | None = None,
         enable_discovery: bool = True,
+        store_local: bool = True,
     ) -> None:
-        """Initialise the node.
-
-        Args:
-            network: The :class:`~firecloud.network.Network` this node belongs to.
-            storage_path: Root directory for chunk storage and metadata.
-            port: TCP port to listen on.
-            max_storage: Maximum bytes for the chunk store (``None`` = 80 % of disk).
-            host: Interface address to bind the server to.
-            node_id: Unique identifier for this node.  Auto-generated when ``None``.
-            enable_discovery: Whether to start mDNS discovery.
-        """
         self.network = network
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
         self.port = port
         self.host = host
         self.enable_discovery = enable_discovery
+        self.store_local = store_local
 
-        # Node identity
         self.node_id = node_id or uuid.uuid4().hex[:16]
 
-        # Core subsystems — initialised eagerly so tests can inject mocks.
+        # Eager init so tests can swap pieces out before start().
         chunks_dir = self.storage_path / "chunks"
         self.chunk_store = ChunkStore(chunks_dir, max_storage=max_storage)
         self.manifest = Manifest(self.storage_path)
 
-        # Transport
         self._server: NodeServer | None = None
         self._client: NodeClient | None = None
-
-        # Discovery
         self._discovery: LANDiscovery | None = None
 
-        # Active peer connections keyed by peer node_id.
+        # Live connections by peer node_id; known addresses as (host, port).
         self.connections: dict[str, PeerConnection] = {}
-
-        # Known peer addresses: {node_id: (host, port)}
         self._known_peers: dict[str, tuple[str, int]] = {}
 
-        # Background tasks
         self._heartbeat_task: asyncio.Task | None = None
         self._manifest_sync_task: asyncio.Task | None = None
 
-        # One-shot background tasks (re-replication, stale-connection
-        # cleanup).  References are kept so they are neither garbage
-        # collected mid-flight nor leaked on shutdown.
+        # Fire-and-forget tasks (re-replication etc). Keeping references
+        # stops the GC collecting them mid-flight.
         self._bg_tasks: set[asyncio.Task] = set()
 
-        # Running state
         self._running = False
 
     def _spawn(self, coro) -> asyncio.Task:
@@ -116,19 +90,21 @@ class Node:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the node: server, discovery, heartbeat, and manifest sync."""
+        """Start the server, discovery, heartbeat, and manifest sync."""
         if self._running:
             return
 
-        # Start TCP server
         self._server = NodeServer(self, self.host, self.port)
         await self._server.start()
 
-        # Start client
+        # Port 0 means "any free port"; read back what the OS gave us so we
+        # advertise a reachable address.
+        if self.port == 0 and self._server.server is not None:
+            self.port = self._server.server.sockets[0].getsockname()[1]
+
         self._client = NodeClient(self)
         self.loop = asyncio.get_running_loop()
 
-        # Start mDNS discovery
         if self.enable_discovery:
             try:
                 self._discovery = LANDiscovery(
@@ -159,10 +135,10 @@ class Node:
             if not addr:
                 continue
             try:
-                await self.connect(addr)
-                logger.info(f"Connected to bootstrap peer: {addr}")
+                await self.join(addr)
+                logger.info(f"Joined network via bootstrap peer: {addr}")
             except Exception as exc:
-                logger.warning(f"Bootstrap connect to {addr} failed: {exc}")
+                logger.warning(f"Bootstrap join to {addr} failed: {exc}")
 
     async def stop(self) -> None:
         """Gracefully shut down the node."""
@@ -214,19 +190,10 @@ class Node:
     # ------------------------------------------------------------------
 
     async def upload(self, filepath: str | Path) -> str:
-        """Upload a file to the network.
+        """Chunk, encrypt, and distribute a file; returns its file_id.
 
-        Pipeline: read → chunk → encrypt → distribute → manifest.
-
-        Args:
-            filepath: Path to the local file to upload.
-
-        Returns:
-            The file_id (HMAC-SHA-256 of the whole file content).
-
-        Raises:
-            builtins.FileNotFoundError: If *filepath* does not exist.
-            StorageFullError: If the quota is exceeded.
+        The file_id is the HMAC-SHA-256 of the whole file under the
+        network's addressing key.
         """
         filepath = Path(filepath)
         if not filepath.is_file():
@@ -235,13 +202,9 @@ class Node:
         hmac_key = self.network.hmac_key
         enc_key = self.network.encryption_key
 
-        # 1. Compute the file-level ID
         file_id = compute_file_id(filepath, hmac_key)
-
-        # 2. Content-defined chunking
         chunks = chunk_file(filepath, hmac_key)
 
-        # 3. Encrypt each chunk
         encrypted_chunks = []
         for c in chunks:
             enc_data = encrypt_chunk(c.data, enc_key)
@@ -256,16 +219,15 @@ class Node:
                 )
             )
 
-        # 4. Distribute
         peer_ids = list(self.connections.keys())
         distributor = Distributor(
             peers=peer_ids,
             local_node_id=self.node_id,
             fec_enabled=len(peer_ids) + 1 >= 5,
+            store_local=self.store_local,
         )
         chunk_infos = await distributor.distribute(encrypted_chunks, self._client)
 
-        # 5. Build manifest entry
         strategy = distributor.get_strategy()
         entry = FileEntry(
             file_id=file_id,
@@ -280,35 +242,21 @@ class Node:
         )
         self.manifest.add_file(entry)
 
-        # 6. Sync manifest to peers
         await self._sync_manifest_to_peers()
 
-        logger.info(f"Uploaded {filepath.name} → {file_id}")
+        logger.info(f"Uploaded {filepath.name} as {file_id}")
         return file_id
 
     async def download(self, file_id: str, output: str | Path) -> None:
-        """Download a file from the network.
-
-        Pipeline: manifest → retrieve → decrypt → verify → reassemble → write.
-
-        Args:
-            file_id: The unique file identifier.
-            output: Local path to write the reassembled file to.
-
-        Raises:
-            firecloud.exceptions.FileNotFoundError: If the file is not in
-                the manifest or is tombstoned.
-            ChunkNotFoundError: If chunks are irrecoverable.
-            ChunkCorruptError: If integrity verification fails.
-        """
+        """Retrieve, decrypt, and reassemble a file to *output*."""
         output = Path(output)
         entry = self.manifest.get_file(file_id)
 
         enc_key = self.network.encryption_key
 
-        # Retrieve encrypted chunks.  The strategy and FEC threshold come
-        # from the manifest entry — the file must be read back the way it
-        # was stored, regardless of how many peers are online right now.
+        # Read the file back the way it was stored. The strategy comes from
+        # the manifest entry, not the live peer count, which may have
+        # changed since upload.
         peer_ids = list(self.connections.keys())
         distributor = Distributor(
             peers=peer_ids,
@@ -316,11 +264,13 @@ class Node:
             fec_enabled=entry.fec_enabled,
         )
         strategy = "erasure_coding" if entry.fec_enabled else "replication"
+        # k=None: infer the FEC threshold from the share count. It may have
+        # been capped below the chunk count at upload.
         encrypted_data_list = await distributor.retrieve(
             entry.chunks,
             self._client,
             strategy=strategy,
-            k=entry.chunk_count,
+            k=None,
         )
 
         # Decrypt and verify each chunk
@@ -353,28 +303,16 @@ class Node:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(reassembled)
 
-        logger.info(f"Downloaded {entry.name} → {output}")
+        logger.info(f"Downloaded {entry.name} to {output}")
 
     async def delete(self, file_id: str) -> None:
-        """Tombstone a file in the manifest and sync to peers.
-
-        Args:
-            file_id: The file to delete.
-
-        Raises:
-            firecloud.exceptions.FileNotFoundError: If the file is not found.
-        """
+        """Tombstone a file in the manifest and sync the change to peers."""
         self.manifest.delete_file(file_id)
         await self._sync_manifest_to_peers()
         logger.info(f"Deleted file {file_id}")
 
     def list_files(self) -> list[dict]:
-        """Return a list of all non-deleted files as plain dicts.
-
-        Each dict contains: ``file_id``, ``name``, ``size``,
-        ``chunk_count``, ``uploaded_at``, ``uploaded_by``,
-        ``fec_enabled``, ``replication_factor``.
-        """
+        """All non-deleted files as plain dicts."""
         entries = self.manifest.list_files()
         return [
             {
@@ -393,16 +331,11 @@ class Node:
     async def verify_file(self, file_id: str) -> dict:
         """Check availability and integrity of every chunk of a file.
 
-        Local chunks are integrity-checked (AEAD decryption for replicated
-        chunks, integrity hash for FEC shares); remote chunks are probed
-        for presence on connected peers without transferring data.
-
-        Returns a report dict with per-chunk locations and an overall
-        ``status`` of ``healthy``, ``degraded``, or ``unrecoverable``.
-
-        Raises:
-            firecloud.exceptions.FileNotFoundError: If the file is not in
-                the manifest or is tombstoned.
+        Local chunks are actually verified (AEAD decrypt for replicated
+        chunks, hash check for FEC shares). Remote chunks are only probed
+        for presence, without pulling the data over. Returns a report with
+        per-chunk locations and a status of healthy, degraded, or
+        unrecoverable.
         """
         entry = self.manifest.get_file(file_id)
         enc_key = self.network.encryption_key
@@ -448,9 +381,13 @@ class Node:
         available = sum(1 for c in chunk_reports if c["locations"])
 
         if entry.fec_enabled:
-            # chunk_count is the reconstruction threshold K; entry.chunks
-            # holds all N shares.
-            k = entry.chunk_count
+            # entry.chunks holds all N shares. Infer the threshold K from N
+            # the same way download does; chunk_count is not the threshold
+            # (K gets capped for big files).
+            from firecloud import fec
+            k = 1
+            while total and fec.compute_n(k) < total:
+                k += 1
             if available >= total:
                 status = "healthy"
             elif available >= k:
@@ -479,7 +416,7 @@ class Node:
         }
 
     async def verify_all(self) -> list[dict]:
-        """Run :meth:`verify_file` for every live file in the manifest."""
+        """verify_file() for every live file in the manifest."""
         reports = []
         for entry in self.manifest.list_files():
             reports.append(await self.verify_file(entry.file_id))
@@ -490,16 +427,84 @@ class Node:
     # ------------------------------------------------------------------
 
     async def connect(self, address: str) -> None:
-        """Connect to a peer by ``host:port`` string.
-
-        Args:
-            address: Peer address in ``host:port`` format.
-        """
+        """Connect to a peer given as "host:port"."""
         host, port_str = address.rsplit(":", 1)
         port = int(port_str)
         peer_node_id = await self._client.connect(host, port)
         self._known_peers[peer_node_id] = (host, port)
         logger.info(f"Connected to peer {peer_node_id} at {host}:{port}")
+
+    async def join(self, address: str) -> None:
+        """Join the network through one bootstrap peer.
+
+        Connects to *address*, learns the rest of the cluster from it and
+        connects to those peers too (best effort), then pulls and pushes
+        manifests so the catalogs converge.
+        """
+        try:
+            await self.connect(address)
+        except Exception as exc:
+            logger.warning(f"Could not reach bootstrap {address}: {exc}")
+            return
+        await self._mesh_with_cluster()
+        await self._sync_manifest_from_peers()
+        await self._sync_manifest_to_peers()
+
+    async def _mesh_with_cluster(self, rounds: int = 2) -> None:
+        """Connect to every peer our current connections know about.
+
+        Two rounds is enough to cover a star or near-mesh topology.
+        Failures are ignored; an unreachable peer shouldn't block the join.
+        """
+        if self._client is None:
+            return
+        for _ in range(rounds):
+            candidates: dict[str, tuple[str, int]] = {}
+            for conn in list(self.connections.values()):
+                try:
+                    peers = await conn.request_peers()
+                except Exception:
+                    peers = None
+                for p in peers or []:
+                    nid = p.get("node_id")
+                    port = int(p.get("port", 0) or 0)
+                    if (
+                        nid
+                        and nid != self.node_id
+                        and nid not in self.connections
+                        and port > 0
+                    ):
+                        candidates[nid] = (p.get("host"), port)
+            if not candidates:
+                break
+            for nid, (host, port) in candidates.items():
+                if nid in self.connections:
+                    continue
+                try:
+                    await self._client.connect(host, port)
+                    self._known_peers[nid] = (host, port)
+                except Exception as exc:
+                    logger.debug(
+                        f"Fan-out connect to {host}:{port} failed: {exc}"
+                    )
+
+    async def _sync_manifest_from_peers(self) -> None:
+        """Pull and merge manifest entries from all connected peers."""
+        from firecloud.manifest import entry_from_dict
+
+        for conn in list(self.connections.values()):
+            try:
+                entries_dicts = await conn.request_manifest()
+            except Exception as exc:
+                logger.debug(f"Manifest pull from peer failed: {exc}")
+                continue
+            if not entries_dicts:
+                continue
+            try:
+                entries = [entry_from_dict(d) for d in entries_dicts]
+                self.manifest.merge(entries)
+            except Exception as exc:
+                logger.debug(f"Merging pulled manifest failed: {exc}")
 
     def status(self) -> dict:
         """Return a status dict describing this node."""
@@ -539,7 +544,7 @@ class Node:
         old = self.connections.get(peer_node_id)
         self.connections[peer_node_id] = conn
         if old is not None and old is not conn:
-            # A reconnect superseded the previous connection — close the
+            # A reconnect superseded the previous connection, so close the
             # stale one.  Its close() sees it no longer owns the slot and
             # will not deregister the new connection.
             self._spawn(old.close())
@@ -624,7 +629,7 @@ class Node:
                                 logger.info(f"Re-replicated chunk {chunk_info.chunk_id[:16]}... to {candidate}")
                             else:
                                 # Candidate selection would re-pick this node
-                                # forever — give up on this chunk for now.
+                                # forever, so give up on this chunk for now.
                                 break
                         else:
                             break
@@ -643,7 +648,7 @@ class Node:
     # ------------------------------------------------------------------
 
     def _on_peer_discovered(self, node_id: str, host: str, port: int) -> None:
-        """Callback when mDNS discovers a peer — schedule auto-connect."""
+        """mDNS found a peer; schedule an auto-connect."""
         if node_id == self.node_id or node_id in self.connections:
             return
         self._known_peers[node_id] = (host, port)

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 _LOG_PATH = Path.home() / ".fc_mlops" / "telemetry_log.jsonl"
 
-app = FastAPI(title="FireCloud Telemetry", version="0.1.0")
+app = FastAPI(title="FireCloud Telemetry", version="0.2.1")
 
 
 class NodeMetrics(BaseModel):
@@ -28,7 +28,7 @@ class NodeMetrics(BaseModel):
 
 
 def _collect_metrics() -> NodeMetrics:
-    # disk I/O — sample over a short window
+    # sample disk I/O over a short window
     disk1 = psutil.disk_io_counters()
     if disk1:
         time.sleep(0.1)

@@ -91,8 +91,8 @@ def main() -> None:
         console.print("[bold green]✓ PASS: Anomaly correctly detected[/bold green]")
     else:
         console.print(
-            "[bold red]✗ FAIL: Anomaly not detected — "
-            "check contamination parameter[/bold red]"
+            "[bold red]✗ FAIL: Anomaly not detected, "
+            "check the contamination parameter[/bold red]"
         )
 
 

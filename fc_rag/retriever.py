@@ -34,7 +34,7 @@ def retrieve(query: str, top_k: int | None = None) -> list[RetrievalResult]:
             limit=k,
         )
     except Exception:
-        # Collection does not exist yet — nothing has been indexed.
+        # Collection does not exist yet, nothing has been indexed.
         return []
     results = response.points
 

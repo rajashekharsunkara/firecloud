@@ -54,10 +54,7 @@ async def save_artifact(
     metrics: dict[str, float] | None = None,
     tags: list[str] | None = None,
 ) -> ArtifactMetadata:
-    """Upload *local_path* to FireCloud and record metadata in the manifest.
-
-    Returns the :class:`ArtifactMetadata` for the saved artifact.
-    """
+    """Upload *local_path* to FireCloud and record it in the artifact manifest."""
     local_path = Path(local_path)
     file_id = await node.upload(local_path)
 
@@ -73,8 +70,8 @@ async def save_artifact(
     )
 
     entries = _load_manifest()
-    # Re-saving the same name+version replaces the old record — otherwise
-    # load_artifact would keep returning the stale first match forever.
+    # Re-saving the same name+version replaces the old record; otherwise
+    # load_artifact would keep returning the stale first match.
     entries = [
         e for e in entries
         if not (e.get("name") == name and e.get("version") == version)

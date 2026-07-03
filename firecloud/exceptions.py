@@ -1,8 +1,8 @@
-"""FireCloud exceptions — typed errors for all failure modes."""
+"""Exception types."""
 
 
 class FireCloudError(Exception):
-    """Base exception for all FireCloud errors."""
+    """Base class for all FireCloud errors."""
 
 
 class NetworkKeyError(FireCloudError):
@@ -10,31 +10,31 @@ class NetworkKeyError(FireCloudError):
 
 
 class NodeAuthError(FireCloudError):
-    """Peer rejected authentication — invalid network token."""
+    """Peer rejected the auth token."""
 
 
 class ChunkNotFoundError(FireCloudError):
-    """Chunk is missing from all known nodes and cannot be recovered."""
+    """Chunk missing from every known node."""
 
 
 class ChunkCorruptError(FireCloudError):
-    """Chunk failed integrity check after decryption — data was tampered with."""
+    """Integrity check failed after decryption."""
 
 
 class InsufficientPeersError(FireCloudError):
-    """Not enough online peers to satisfy the requested replication/FEC level."""
+    """Not enough online peers for the requested replication/FEC level."""
 
 
 class StorageFullError(FireCloudError):
-    """No node has enough storage capacity for the requested operation."""
+    """No node has enough capacity for the operation."""
 
 
 class FileNotFoundError(FireCloudError):
-    """The given file_id does not exist in the network manifest."""
+    """file_id not present in the network manifest."""
 
 
 class TransportError(FireCloudError):
-    """Network transport failure — connection refused, timeout, or protocol error."""
+    """Connection refused, timeout, or protocol error."""
 
 
 class DiscoveryError(FireCloudError):

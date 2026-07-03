@@ -1,9 +1,9 @@
-"""Integration tests for FireCloud — end-to-end scenarios.
+"""End-to-end integration tests.
 
-These tests exercise the full pipeline: init network → start node(s) →
-upload → download → verify byte-identical.  They cover multi-node
-file exchange, node departure resilience, storage quota enforcement,
-wrong passphrase rejection, and chunk tampering detection.
+Each scenario runs the whole pipeline: init a network, start nodes,
+upload, download, and check the bytes match.  Coverage includes
+multi-node file exchange, node departure, storage quota enforcement,
+wrong-passphrase rejection, and chunk tampering detection.
 """
 
 import asyncio
@@ -57,7 +57,7 @@ def _make_file(tmp_path: Path, name: str = "data.bin", size: int = 20_000) -> Pa
 
 
 class TestTwoNodeExchange:
-    """Init network → start 2 nodes → upload on A → download on B → verify."""
+    """Upload on node A, download on node B, bytes must match."""
 
     async def test_two_node_roundtrip(self, tmp_path):
         net = Network.create("integration-test")
@@ -92,7 +92,7 @@ class TestTwoNodeExchange:
 
 
 class TestNodeDeparture:
-    """3 nodes → upload (replication=2) → kill node → download still works."""
+    """With 3 nodes and replication=2, downloads survive one node dying."""
 
     async def test_node_departure_replication(self, tmp_path):
         net = Network.create("departure-test")
@@ -115,7 +115,7 @@ class TestNodeDeparture:
                 await nodes[i].connect(f"127.0.0.1:{ports[0]}")
             await asyncio.sleep(0.3)
 
-            # Upload on node-0 with replication strategy (3 nodes → replication)
+            # Upload on node-0; a 3-node cluster picks the replication strategy
             src = _make_file(tmp_path / "src", size=20_000)
             original = src.read_bytes()
             file_id = await nodes[0].upload(src)
@@ -142,7 +142,7 @@ class TestNodeDeparture:
 
 
 class TestStorageQuota:
-    """Set a 1 KB quota → upload a larger file → verify StorageFullError."""
+    """A 1 KB quota rejects a larger upload with StorageFullError."""
 
     async def test_quota_exceeded(self, tmp_path):
         net = Network.create("quota-test")
@@ -162,7 +162,7 @@ class TestStorageQuota:
 
 
 class TestWrongPassphrase:
-    """Attempt to load network with wrong passphrase → NetworkKeyError."""
+    """Loading the keystore with a wrong passphrase raises NetworkKeyError."""
 
     def test_wrong_passphrase(self, tmp_path):
         net = Network.create("correct-pass")
@@ -179,7 +179,7 @@ class TestWrongPassphrase:
 
 
 class TestChunkTampering:
-    """Manually corrupt a stored chunk → verify ChunkCorruptError on download."""
+    """A corrupted chunk on disk raises ChunkCorruptError on download."""
 
     async def test_tampered_chunk(self, tmp_path):
         net = Network.create("tamper-test")
@@ -214,7 +214,7 @@ class TestChunkTampering:
 
 
 class TestManifestConsistency:
-    """Upload files on two nodes → verify manifests converge."""
+    """Manifests converge after uploads on two different nodes."""
 
     async def test_concurrent_uploads(self, tmp_path):
         net = Network.create("consistency-test")
@@ -255,8 +255,8 @@ class TestManifestConsistency:
 
 
 class TestSingleNodeFullPipeline:
-    """End-to-end: file → chunk → encrypt → store → manifest → retrieve →
-    decrypt → reassemble → compare with original (byte-identical)."""
+    """Full pipeline on one node, from chunking through reassembly,
+    checked byte-identical against the original at several sizes."""
 
     async def test_full_pipeline(self, tmp_path):
         net = Network.create("pipeline-test")

@@ -90,13 +90,13 @@ def check_anomaly(log_path: Path | None = None) -> AnomalyReport | dict:
     if not is_anomaly:
         rec = "Node healthy"
     elif "chunk_upload_latency_ms" in flagged:
-        rec = "High latency — check network"
+        rec = "High upload latency, check the network"
     elif "cpu_percent" in flagged:
-        rec = "CPU spike — check running processes"
+        rec = "CPU spike, check running processes"
     elif "disk_io_read_mbps" in flagged:
-        rec = "Disk I/O degraded — check storage health"
+        rec = "Slow disk reads, check storage health"
     else:
-        rec = "Anomalous reading — investigate node"
+        rec = "Anomalous reading, investigate the node"
 
     report = AnomalyReport(
         timestamp=datetime.now(timezone.utc),

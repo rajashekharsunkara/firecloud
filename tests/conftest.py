@@ -24,7 +24,7 @@ def test_passphrase():
 
 @pytest.fixture
 def network_key():
-    """Deterministic 256-bit test key — NOT for production."""
+    """Deterministic 256-bit test key, never for real use."""
     return b"\x01" * 32
 
 

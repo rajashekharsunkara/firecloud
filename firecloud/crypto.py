@@ -1,10 +1,5 @@
-"""FireCloud cryptographic engine.
-
-Provides chunk-level authenticated encryption (XChaCha20-Poly1305),
-convergent chunk addressing (HMAC-SHA-256), integrity verification
-(SHA-256), passphrase-protected keystore (scrypt + AES-256-GCM),
-and HKDF-based sub-key derivation.
-"""
+"""Crypto primitives: XChaCha20-Poly1305 chunk encryption, HMAC-SHA-256
+chunk addressing, the scrypt/AES-GCM keystore, and HKDF sub-keys."""
 
 import hashlib
 import hmac
@@ -37,15 +32,7 @@ _SCRYPT_P = 1
 
 
 def encrypt_chunk(plaintext: bytes, key: bytes) -> bytes:
-    """Encrypt *plaintext* with XChaCha20-Poly1305.
-
-    Args:
-        plaintext: Arbitrary-length data (may be empty).
-        key: 32-byte symmetric key.
-
-    Returns:
-        ``nonce (24 B) || ciphertext || auth_tag (16 B)``
-    """
+    """XChaCha20-Poly1305. Output: nonce (24B) || ciphertext || tag (16B)."""
     nonce = get_random_bytes(_XCHACHA_NONCE_LEN)
     cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
     ciphertext, tag = cipher.encrypt_and_digest(plaintext)
@@ -53,18 +40,10 @@ def encrypt_chunk(plaintext: bytes, key: bytes) -> bytes:
 
 
 def decrypt_chunk(encrypted: bytes, key: bytes) -> bytes:
-    """Decrypt data produced by :func:`encrypt_chunk`.
+    """Inverse of encrypt_chunk.
 
-    Args:
-        encrypted: ``nonce (24 B) || ciphertext || auth_tag (16 B)``
-        key: 32-byte symmetric key (must match encryption key).
-
-    Returns:
-        The original plaintext bytes.
-
-    Raises:
-        ChunkCorruptError: Authentication tag verification failed
-            (wrong key, truncated data, or tampered ciphertext).
+    Raises ChunkCorruptError when the tag check fails: wrong key,
+    truncation, or tampering.
     """
     if len(encrypted) < _XCHACHA_NONCE_LEN + 16:
         raise ChunkCorruptError(
@@ -81,7 +60,7 @@ def decrypt_chunk(encrypted: bytes, key: bytes) -> bytes:
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
     except (ValueError, KeyError) as exc:
         raise ChunkCorruptError(
-            "Chunk authentication failed — data may be corrupt or the key is wrong"
+            "Chunk authentication failed: corrupt data or wrong key"
         ) from exc
 
     return plaintext
@@ -93,18 +72,10 @@ def decrypt_chunk(encrypted: bytes, key: bytes) -> bytes:
 
 
 def derive_chunk_id(plaintext: bytes, hmac_key: bytes) -> str:
-    """Compute a keyed chunk address via HMAC-SHA-256.
+    """Keyed chunk address: HMAC-SHA-256 hex digest.
 
-    The result is deterministic for the same ``(plaintext, hmac_key)`` pair
-    but unpredictable without knowledge of *hmac_key*, preventing offline
-    content guessing attacks.
-
-    Args:
-        plaintext: The chunk data.
-        hmac_key: 32-byte HMAC key derived from the network key.
-
-    Returns:
-        Hex-encoded HMAC-SHA-256 digest (64 hex chars).
+    Deterministic per (plaintext, key) but useless to anyone without the
+    key, so an outsider can't confirm content by hashing guesses.
     """
     return hmac.new(hmac_key, plaintext, hashlib.sha256).hexdigest()
 
@@ -120,11 +91,7 @@ def compute_integrity_hash(plaintext: bytes) -> str:
 
 
 def generate_network_key() -> bytes:
-    """Generate a fresh 32-byte (256-bit) random network key.
-
-    Returns:
-        Cryptographically-random 32-byte key.
-    """
+    """Fresh random 32-byte network key."""
     return get_random_bytes(_KEY_LEN)
 
 
@@ -134,18 +101,9 @@ def generate_network_key() -> bytes:
 
 
 def encrypt_keystore(key: bytes, passphrase: str) -> bytes:
-    """Encrypt a network key under a passphrase using scrypt + AES-256-GCM.
+    """Wrap the network key under a passphrase (scrypt + AES-256-GCM).
 
-    Wire format::
-
-        salt (16 B) || nonce (12 B) || ciphertext || tag (16 B)
-
-    Args:
-        key: The 32-byte network key to protect.
-        passphrase: User-supplied passphrase.
-
-    Returns:
-        The encrypted keystore blob.
+    Blob layout: salt (16B) || nonce (12B) || ciphertext || tag (16B).
     """
     salt = get_random_bytes(_SCRYPT_SALT_LEN)
     wrapping_key = _derive_scrypt_key(passphrase, salt)
@@ -158,18 +116,7 @@ def encrypt_keystore(key: bytes, passphrase: str) -> bytes:
 
 
 def decrypt_keystore(encrypted: bytes, passphrase: str) -> bytes:
-    """Decrypt a keystore blob produced by :func:`encrypt_keystore`.
-
-    Args:
-        encrypted: The encrypted keystore blob.
-        passphrase: User-supplied passphrase.
-
-    Returns:
-        The 32-byte network key.
-
-    Raises:
-        NetworkKeyError: Wrong passphrase or corrupt keystore data.
-    """
+    """Unwrap a keystore blob; NetworkKeyError on bad passphrase or data."""
     min_len = _SCRYPT_SALT_LEN + _AES_GCM_NONCE_LEN + 16  # salt+nonce+tag
     if len(encrypted) < min_len:
         raise NetworkKeyError("Keystore data is too short or corrupt")
@@ -187,7 +134,7 @@ def decrypt_keystore(encrypted: bytes, passphrase: str) -> bytes:
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
     except (ValueError, KeyError) as exc:
         raise NetworkKeyError(
-            "Failed to decrypt keystore — wrong passphrase or corrupt data"
+            "Failed to decrypt keystore: wrong passphrase or corrupt data"
         ) from exc
 
     return plaintext

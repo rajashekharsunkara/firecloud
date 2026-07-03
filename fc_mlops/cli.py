@@ -1,4 +1,4 @@
-"""fc-ml CLI — artifact management, telemetry, and anomaly detection."""
+"""CLI for artifact management, telemetry, and anomaly detection."""
 
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import click
 
 @click.group()
 def cli():
-    """fc-ml — MLOps extensions for FireCloud."""
+    """MLOps extensions for FireCloud."""
     pass
 
 
@@ -169,7 +169,7 @@ def anomaly_check():
     result = check_anomaly()
 
     if isinstance(result, dict):
-        click.echo(f"Insufficient data: {result.get('readings', 0)} readings (need ≥ 50)")
+        click.echo(f"Insufficient data: {result.get('readings', 0)} readings (need at least 50)")
         return
 
     click.echo(click.style("Anomaly Detection Results", bold=True))

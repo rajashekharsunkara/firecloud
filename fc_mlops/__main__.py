@@ -1,4 +1,4 @@
-"""fc_mlops __main__ — allows ``python -m fc_mlops.simulate_failure``."""
+"""Running `python -m fc_mlops` launches the failure simulation demo."""
 
 from fc_mlops.simulate_failure import main
 

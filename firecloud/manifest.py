@@ -48,10 +48,10 @@ _FILE_ENTRY_FIELDS = {f.name for f in fields(FileEntry)}
 
 
 def entry_from_dict(raw: dict) -> FileEntry:
-    """Build a :class:`FileEntry` from a plain dict, ignoring unknown keys.
+    """Build a FileEntry from a dict, ignoring unknown keys.
 
-    Used for both disk deserialisation and remote manifest sync, so a
-    newer node adding fields cannot break older nodes (and vice versa).
+    Used for disk loads and remote manifest sync, so a newer node adding
+    fields can't break older nodes.
     """
     data = dict(raw)
     chunks = [
@@ -68,20 +68,13 @@ def entry_from_dict(raw: dict) -> FileEntry:
 
 
 class Manifest:
-    """Thread-safe, JSON-backed file manifest with Lamport clock.
+    """Thread-safe file manifest persisted as manifest.json.
 
-    The manifest is persisted as a JSON file at
-    ``{storage_path}/manifest.json``.  Every mutation increments a Lamport
-    clock so that distributed nodes can merge their manifests using a
-    last-writer-wins strategy.
+    Every mutation bumps a Lamport clock so nodes can merge manifests
+    last-writer-wins.
     """
 
     def __init__(self, storage_path: Path | str) -> None:
-        """Initialise the manifest.
-
-        Args:
-            storage_path: Directory that will contain ``manifest.json``.
-        """
         self._storage_path = Path(storage_path)
         self._storage_path.mkdir(parents=True, exist_ok=True)
         self._manifest_file = self._storage_path / "manifest.json"
@@ -95,14 +88,7 @@ class Manifest:
     # ------------------------------------------------------------------
 
     def add_file(self, entry: FileEntry) -> None:
-        """Add or update a file entry.
-
-        The Lamport clock is incremented and the new timestamp is written
-        onto *entry* before it is stored.
-
-        Args:
-            entry: The :class:`FileEntry` to insert or update.
-        """
+        """Insert or update an entry, stamping it with the next clock tick."""
         with self._lock:
             self._clock += 1
             entry.lamport_ts = self._clock
@@ -110,18 +96,7 @@ class Manifest:
             self._save_unlocked()
 
     def get_file(self, file_id: str) -> FileEntry:
-        """Retrieve a file entry by its ID.
-
-        Args:
-            file_id: Unique identifier of the file.
-
-        Returns:
-            The corresponding :class:`FileEntry`.
-
-        Raises:
-            firecloud.exceptions.FileNotFoundError: If the file is absent
-                or has been tombstoned.
-        """
+        """Look up an entry; raises FileNotFoundError if absent or deleted."""
         with self._lock:
             entry = self._entries.get(file_id)
             if entry is None or entry.deleted:
@@ -131,18 +106,7 @@ class Manifest:
             return entry
 
     def delete_file(self, file_id: str) -> None:
-        """Tombstone a file entry.
-
-        The Lamport clock is incremented and the entry is marked as deleted
-        with the current UTC time.
-
-        Args:
-            file_id: Unique identifier of the file.
-
-        Raises:
-            firecloud.exceptions.FileNotFoundError: If the file does not
-                exist in the manifest.
-        """
+        """Tombstone an entry (kept for sync; gc_tombstones prunes later)."""
         with self._lock:
             entry = self._entries.get(file_id)
             if entry is None:
@@ -156,14 +120,7 @@ class Manifest:
             self._save_unlocked()
 
     def list_files(self, include_deleted: bool = False) -> list[FileEntry]:
-        """Return file entries tracked by the manifest.
-
-        Args:
-            include_deleted: When ``True``, tombstoned entries are included.
-
-        Returns:
-            A list of :class:`FileEntry` instances.
-        """
+        """Entries in the manifest, skipping tombstones unless asked."""
         with self._lock:
             if include_deleted:
                 return list(self._entries.values())
@@ -185,16 +142,10 @@ class Manifest:
         return remote.uploaded_by > local.uploaded_by
 
     def merge(self, remote_entries: list[FileEntry]) -> None:
-        """Merge remote manifest entries using last-writer-wins.
+        """Merge remote entries last-writer-wins.
 
-        For each remote entry the local entry is replaced when the remote
-        Lamport timestamp is strictly greater, with a deterministic
-        tie-break (tombstone, then uploader node ID) for equal timestamps.
-        New file IDs are always accepted.  The local clock is advanced to
-        the maximum of the local clock and the highest remote timestamp.
-
-        Args:
-            remote_entries: Entries received from a remote node.
+        New file IDs are always accepted; the local clock advances to the
+        highest timestamp seen.
         """
         with self._lock:
             for remote in remote_entries:
@@ -207,25 +158,13 @@ class Manifest:
             self._save_unlocked()
 
     def increment_clock(self) -> int:
-        """Increment and return the Lamport clock.
-
-        Returns:
-            The new clock value.
-        """
+        """Bump and return the Lamport clock."""
         with self._lock:
             self._clock += 1
             return self._clock
 
     def gc_tombstones(self, max_age_days: int = 30) -> int:
-        """Remove tombstoned entries older than *max_age_days*.
-
-        Args:
-            max_age_days: Number of days after which a tombstone is eligible
-                for garbage collection.
-
-        Returns:
-            The number of entries removed.
-        """
+        """Drop tombstones older than *max_age_days*; returns the count."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         removed = 0
         with self._lock:
@@ -247,12 +186,11 @@ class Manifest:
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise the entire manifest to a plain ``dict``."""
+        """Whole manifest as a plain dict."""
         with self._lock:
             return self._to_dict_unlocked()
 
     def _to_dict_unlocked(self) -> dict:
-        """Serialise without taking the lock (caller must hold ``_lock``)."""
         return {
             "clock": self._clock,
             "entries": {
@@ -272,10 +210,7 @@ class Manifest:
             self._save_unlocked()
 
     def load(self) -> None:
-        """Load the manifest from disk.
-
-        If the manifest file does not exist an empty manifest is created.
-        """
+        """Load from disk; missing file means an empty manifest."""
         with self._lock:
             if not self._manifest_file.is_file():
                 self._clock = 0
@@ -292,11 +227,7 @@ class Manifest:
     # ------------------------------------------------------------------
 
     def _save_unlocked(self) -> None:
-        """Write manifest JSON to disk (caller must hold ``_lock``).
-
-        Writes to a temporary file and renames it into place so a crash
-        mid-write cannot leave a truncated manifest behind.
-        """
+        # Temp file + rename: a crash mid-write can't truncate the manifest.
         tmp_file = self._manifest_file.with_name(self._manifest_file.name + ".tmp")
         tmp_file.write_text(
             json.dumps(self._to_dict_unlocked(), indent=2, default=str),

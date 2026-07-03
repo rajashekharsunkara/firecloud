@@ -1,8 +1,7 @@
-"""FireCloud Transport Engine.
+"""Peer-to-peer transport: asyncio TCP over TLS with a small binary protocol.
 
-Handles secure peer-to-peer communication using asyncio TCP over TLS,
-implementing a custom binary protocol, handshake, multiplexed chunk transfer,
-manifest synchronization, and heartbeat monitoring.
+Covers the auth handshake, chunk transfer, manifest sync, peer gossip, and
+heartbeats.
 """
 
 import asyncio
@@ -37,22 +36,21 @@ MSG_STORE_FAIL = 0x15
 MSG_HAS_CHUNK = 0x16
 MSG_HAS_CHUNK_RESP = 0x17
 MSG_SYNC_MANIFEST = 0x20
+MSG_MANIFEST_REQ = 0x21
+MSG_MANIFEST_RESP = 0x22
 MSG_HEARTBEAT = 0x30
 MSG_PEER_LIST = 0x40
+MSG_PEER_REQ = 0x41
+MSG_PEER_RESP = 0x42
 
-# Largest frame a peer may send.  Chunks top out at 64 KiB plus encryption
-# overhead; manifest syncs are the only frames that can grow into the
-# megabytes, so 64 MiB leaves generous headroom while preventing a hostile
-# or corrupt length prefix from triggering a multi-gigabyte allocation.
+# Chunks top out around 64 KiB; only manifest syncs get into the megabytes.
+# The cap stops a corrupt or hostile length prefix from allocating gigabytes.
 MAX_FRAME_SIZE = 64 * 1024 * 1024
 
-# How long to wait for a peer to complete the auth handshake.
 HANDSHAKE_TIMEOUT = 10.0
-
-# Default wait for a response to a chunk request before giving up.
 REQUEST_TIMEOUT = 30.0
 
-# Chunk IDs are HMAC-SHA-256 hex digests — always 64 bytes on the wire.
+# Chunk IDs are HMAC-SHA-256 hex digests, 64 bytes on the wire.
 _CHUNK_ID_LEN = 64
 
 # ---------------------------------------------------------------------------
@@ -173,9 +171,8 @@ class PeerConnection:
         self.node = node
         self.write_lock = asyncio.Lock()
         self.retrieve_lock = asyncio.Lock()
-        # In-flight requests awaiting a peer response, keyed by
-        # (kind, chunk_id) so a late or duplicate response can never be
-        # delivered to the wrong request.
+        # In-flight requests keyed by (kind, chunk_id), so a late or
+        # duplicate response can't land on the wrong request.
         self._pending: dict[tuple[str, str], asyncio.Future] = {}
         self._closed = False
         self.last_seen = datetime.now(timezone.utc)
@@ -196,9 +193,8 @@ class PeerConnection:
     ):
         """Send a request and wait for the matching response.
 
-        Returns the future's result, or ``None`` when the peer does not
-        answer in time or the connection drops — callers treat that as a
-        miss and fall back to other peers.
+        Returns None when the peer doesn't answer in time or the connection
+        drops; callers treat that as a miss and try other peers.
         """
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -225,11 +221,7 @@ class PeerConnection:
     async def retrieve_chunk(
         self, chunk_id: str, timeout: float = REQUEST_TIMEOUT
     ) -> bytes | None:
-        """Request and retrieve a chunk from this peer.
-
-        Returns ``None`` if the peer does not have the chunk, does not
-        respond within *timeout* seconds, or the connection fails.
-        """
+        """Fetch a chunk from this peer; None if missing or unresponsive."""
         async with self.retrieve_lock:
             return await self._request(
                 "retrieve",
@@ -242,10 +234,10 @@ class PeerConnection:
     async def store_chunk(
         self, chunk_id: str, data: bytes, timeout: float = REQUEST_TIMEOUT
     ) -> bool:
-        """Store a chunk on this peer and wait for acknowledgement.
+        """Store a chunk on this peer.
 
-        Returns ``True`` only when the peer confirms the chunk was
-        persisted, so callers can record placement accurately.
+        True only once the peer acks the write, so placement records stay
+        accurate.
         """
         result = await self._request(
             "store",
@@ -266,6 +258,24 @@ class PeerConnection:
             timeout,
         )
         return bool(result)
+
+    async def request_manifest(
+        self, timeout: float = REQUEST_TIMEOUT
+    ) -> list | None:
+        """Ask the peer for its manifest entries (list of dicts, or None).
+
+        Lets a freshly connected node pick up the file catalog right away
+        instead of waiting for the next periodic push.
+        """
+        return await self._request(
+            "manifest", MSG_MANIFEST_REQ, "", b"", timeout
+        )
+
+    async def request_peers(self, timeout: float = 10.0) -> list | None:
+        """Ask the peer which node addresses it knows."""
+        return await self._request(
+            "peers", MSG_PEER_REQ, "", b"", timeout
+        )
 
     def _resolve(self, kind: str, chunk_id: str, value) -> None:
         """Resolve a pending request future, ignoring stale responses."""
@@ -359,6 +369,56 @@ class PeerConnection:
                     except Exception as e:
                         logger.error(f"Failed to merge remote manifest: {e}")
 
+                elif msg_type == MSG_MANIFEST_REQ:
+                    try:
+                        from dataclasses import asdict
+                        entries = [
+                            asdict(e) for e in self.node.manifest.to_entries()
+                        ]
+                        await self.send_message(
+                            MSG_MANIFEST_RESP,
+                            json.dumps(entries).encode("utf-8"),
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to answer manifest request: {e}")
+                        await self.send_message(MSG_MANIFEST_RESP, b"[]")
+
+                elif msg_type == MSG_MANIFEST_RESP:
+                    try:
+                        entries = json.loads(payload.decode("utf-8"))
+                    except Exception:
+                        entries = []
+                    self._resolve("manifest", "", entries)
+
+                elif msg_type == MSG_PEER_REQ:
+                    try:
+                        known = getattr(self.node, "_known_peers", {})
+                        peers = [
+                            {"node_id": nid, "host": h, "port": p}
+                            for nid, (h, p) in known.items()
+                        ]
+                        await self.send_message(
+                            MSG_PEER_RESP, json.dumps(peers).encode("utf-8")
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to answer peer request: {e}")
+                        await self.send_message(MSG_PEER_RESP, b"[]")
+
+                elif msg_type == MSG_PEER_RESP:
+                    try:
+                        peers = json.loads(payload.decode("utf-8"))
+                    except Exception:
+                        peers = []
+                    for p in peers:
+                        try:
+                            if p["node_id"] != self.node.node_id:
+                                self.node.add_peer_discovered(
+                                    p["node_id"], p["host"], p["port"]
+                                )
+                        except Exception:
+                            pass
+                    self._resolve("peers", "", peers)
+
                 elif msg_type == MSG_PEER_LIST:
                     try:
                         peers = json.loads(payload.decode("utf-8"))
@@ -394,8 +454,8 @@ class PeerConnection:
             await asyncio.wait_for(self.writer.wait_closed(), timeout=0.5)
         except (Exception, asyncio.CancelledError):
             pass
-        # Only deregister if this object still owns the slot for the peer —
-        # a reconnect may already have replaced us in node.connections.
+        # Deregister only if we still own the slot; a reconnect may have
+        # already replaced us in node.connections.
         connections = getattr(self.node, "connections", None)
         current = connections.get(self.peer_node_id) if connections is not None else None
         if current is None or current is self:
@@ -447,8 +507,7 @@ class NodeServer:
     ) -> None:
         """Handle an incoming connection from a peer."""
         try:
-            # Perform server handshake — bounded so an idle or hostile
-            # client cannot hold the slot open indefinitely.
+            # Bounded handshake; an idle client can't hold the slot open.
             msg_type, payload = await asyncio.wait_for(
                 read_msg(reader), timeout=HANDSHAKE_TIMEOUT
             )
@@ -463,12 +522,33 @@ class NodeServer:
                 return
 
             token = payload[:32]
-            peer_node_id = payload[32:].decode("utf-8")
 
             if not hmac.compare_digest(token, self.node.network.auth_token):
                 writer.close()
                 await writer.wait_closed()
                 raise NodeAuthError("Peer authentication failed: invalid token")
+
+            # After the token: JSON with the peer's node_id and listen port.
+            # A bare node_id (older clients) is accepted too.
+            peer_port = 0
+            try:
+                meta = json.loads(payload[32:].decode("utf-8"))
+                peer_node_id = meta["node_id"]
+                peer_port = int(meta.get("port", 0))
+            except Exception:
+                peer_node_id = payload[32:].decode("utf-8")
+
+            # Record observed IP + advertised port so we can gossip a
+            # reachable address for this peer.
+            if peer_port:
+                peername = writer.get_extra_info("peername")
+                observed_host = peername[0] if peername else "127.0.0.1"
+                try:
+                    self.node.add_peer_discovered(
+                        peer_node_id, observed_host, peer_port
+                    )
+                except Exception:
+                    pass
 
             # Authentication successful. Send AUTH_OK with our node ID.
             await write_msg(writer, MSG_AUTH_OK, self.node.node_id.encode("utf-8"))
@@ -505,8 +585,12 @@ class NodeClient:
             raise TransportError(f"Failed to connect to {host}:{port}: {exc}") from exc
 
         try:
-            # Send AUTH message: auth_token (32 bytes) + our node_id (UTF-8 bytes)
-            auth_payload = self.node.network.auth_token + self.node.node_id.encode("utf-8")
+            # AUTH = 32-byte token + JSON with our node_id and listen port.
+            meta = json.dumps({
+                "node_id": self.node.node_id,
+                "port": getattr(self.node, "port", 0),
+            }).encode("utf-8")
+            auth_payload = self.node.network.auth_token + meta
             await write_msg(writer, MSG_AUTH, auth_payload)
 
             # Receive AUTH_OK

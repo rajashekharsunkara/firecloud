@@ -280,7 +280,7 @@ async def test_corrupt_share_is_skipped_during_reconstruction(tmp_path):
 
 @pytest.mark.asyncio
 async def test_distribute_skips_full_peer_and_records_actual_placement(tmp_path):
-    """Placement metadata must reflect where chunks were actually stored —
+    """Placement metadata must reflect where chunks actually landed:
     a peer that rejects the store (quota) must not appear in stored_on."""
     net = Network.create("passphrase")
 
@@ -310,3 +310,114 @@ async def test_distribute_skips_full_peer_and_records_actual_placement(tmp_path)
     assert retrieved == [b"data1"]
 
     await server_b.stop()
+
+
+async def _connect_five(tmp_path, store_local=True):
+    """Bring up node-A connected to four peers; return (distributor, ctx)."""
+    net = Network.create("passphrase")
+    node_a = MockNode("node-A", net, tmp_path)
+    peers = [MockNode(f"node-{c}", net, tmp_path) for c in "BCDE"]
+
+    servers = []
+    for peer in peers:
+        srv = NodeServer(peer, "127.0.0.1", 0)
+        await srv.start()
+        servers.append(srv)
+
+    client_a = NodeClient(node_a)
+    for srv in servers:
+        await client_a.connect("127.0.0.1", srv.server.sockets[0].getsockname()[1])
+    await asyncio.sleep(0.2)
+
+    d = Distributor(
+        peers=[p.node_id for p in peers],
+        local_node_id="node-A",
+        fec_threshold=5,
+        store_local=store_local,
+    )
+    return d, (node_a, peers, servers, client_a)
+
+
+@pytest.mark.asyncio
+async def test_erasure_coding_caps_k_for_large_files(tmp_path):
+    """Files with more chunks than zfec's block limit still encode and decode.
+
+    Regression: distributing >170 chunks set K = chunk count, so
+    N = ceil(1.5*K) blew past zfec's 256-block cap and upload crashed.
+    """
+    d, (node_a, peers, servers, client_a) = await _connect_five(tmp_path)
+    # 200 chunks would give N = 300 > 256 without the cap.
+    chunks = [SimpleChunk(f"id{i}", f"h{i}", i, bytes([i % 251]) * 4) for i in range(200)]
+
+    infos = await d.distribute(chunks, client_a)
+    await asyncio.sleep(0.2)
+
+    # K is capped at 170, so N = ceil(1.5 * 170) = 255 <= 256.
+    assert len(infos) == 255
+    retrieved = await d.retrieve(infos, client_a)
+    assert retrieved == [c.data for c in chunks]
+
+    for srv in servers:
+        await srv.stop()
+
+
+@pytest.mark.asyncio
+async def test_store_local_false_keeps_shares_off_the_uploader(tmp_path):
+    """A transient uploader (store_local=False) keeps shares only on peers."""
+    d, (node_a, peers, servers, client_a) = await _connect_five(
+        tmp_path, store_local=False
+    )
+    chunks = [SimpleChunk(f"id{i}", f"h{i}", i, f"data{i}".encode()) for i in range(3)]
+
+    infos = await d.distribute(chunks, client_a)
+    await asyncio.sleep(0.2)
+
+    # Nothing lands on the local (about-to-exit) node.
+    assert all("node-A" not in info.stored_on for info in infos)
+    assert node_a.chunk_store.list_chunks() == []
+    # The file is still fully retrievable from the durable peers.
+    retrieved = await d.retrieve(infos, client_a)
+    assert retrieved == [c.data for c in chunks]
+
+    for srv in servers:
+        await srv.stop()
+
+
+@pytest.mark.asyncio
+async def test_erasure_retrieve_at_exact_share_threshold(tmp_path):
+    """Reconstruction works with exactly K shares left and fails with K-1."""
+    net = Network.create("passphrase")
+    node_a = MockNode("node-A", net, tmp_path)
+
+    class FakeTransport:
+        def __init__(self, node_obj):
+            self.node = node_obj
+
+    transport = FakeTransport(node_a)
+
+    # Four phantom peers force the erasure-coding strategy; with no live
+    # connections every share falls back to node-A's local store, which
+    # lets the test delete individual shares surgically.
+    d = Distributor(
+        peers=["node-B", "node-C", "node-D", "node-E"],
+        local_node_id="node-A",
+    )
+    chunks = [
+        SimpleChunk("id1", "hash1", 0, b"data1"),
+        SimpleChunk("id2", "hash2", 1, b"data2"),
+        SimpleChunk("id3", "hash3", 2, b"data3"),
+    ]
+    infos = await d.distribute(chunks, transport)
+    assert len(infos) == 5  # K=3, N=5
+    assert all(i.stored_on == ["node-A"] for i in infos)
+
+    # Drop shares until exactly K remain; K must still reconstruct.
+    node_a.chunk_store.delete(infos[0].chunk_id)
+    node_a.chunk_store.delete(infos[1].chunk_id)
+    retrieved = await d.retrieve(infos, transport, strategy="erasure_coding")
+    assert retrieved == [b"data1", b"data2", b"data3"]
+
+    # One below the threshold cannot.
+    node_a.chunk_store.delete(infos[2].chunk_id)
+    with pytest.raises(ChunkNotFoundError):
+        await d.retrieve(infos, transport, strategy="erasure_coding")

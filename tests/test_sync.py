@@ -1,4 +1,4 @@
-"""Tests for firecloud.sync — watchdog-based folder synchronization."""
+"""Tests for firecloud.sync: watchdog-based folder synchronization."""
 
 import asyncio
 import os

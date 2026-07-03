@@ -268,7 +268,7 @@ async def test_store_chunk_ack_roundtrip(clean_node_dir):
     assert ok is True
     assert node_b.chunk_store.retrieve(chunk_id) == b"ack-tested-data"
 
-    # Fill B's quota — the next store must be NACKed.
+    # Fill B's quota so the next store gets NACKed.
     node_b.chunk_store._max_storage = 0
     ok = await conn_a.store_chunk("e" * 64, b"wont-fit", timeout=5)
     assert ok is False

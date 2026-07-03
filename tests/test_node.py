@@ -1,4 +1,4 @@
-"""Tests for firecloud.node — single-node and multi-node orchestration."""
+"""Tests for firecloud.node: single-node and multi-node orchestration."""
 
 import asyncio
 import os
@@ -6,9 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from firecloud import fec
+from firecloud.crypto import compute_integrity_hash, derive_chunk_id
 from firecloud.exceptions import (
     FileNotFoundError as ManifestFileNotFoundError,
 )
+from firecloud.manifest import ChunkInfo, FileEntry
 from firecloud.network import Network
 from firecloud.node import Node
 
@@ -333,6 +336,48 @@ class TestTwoNodeTransport:
             await node_a.stop()
 
 
+class TestMeshJoin:
+    """Node.join fans out into a mesh via one bootstrap peer and pulls the catalog."""
+
+    async def test_join_meshes_and_pulls_catalog(self, tmp_path):
+        net = Network.create("mesh-secret")
+
+        def mk(nid):
+            return Node(network=net, storage_path=tmp_path / nid, port=0,
+                        enable_discovery=False, node_id=nid)
+
+        hub, b, c = mk("hub"), mk("spoke-b"), mk("spoke-c")
+        d = None
+        for n in (hub, b, c):
+            await n.start()
+        try:
+            hub_addr = f"127.0.0.1:{hub.port}"
+            # Spokes join via the hub; the hub learns their real listen ports.
+            await b.join(hub_addr)
+            await c.join(hub_addr)
+            await asyncio.sleep(0.3)
+
+            # A file uploaded on spoke-b gives the catalog something to pull.
+            src = _make_test_file(tmp_path / "src", size=20_000)
+            file_id = await b.upload(src)
+            await asyncio.sleep(0.2)
+
+            # A brand-new node joins through the hub only...
+            d = mk("newcomer")
+            await d.start()
+            await d.join(hub_addr)
+            await asyncio.sleep(0.3)
+
+            # ...yet ends up connected to the whole cluster...
+            assert {"hub", "spoke-b", "spoke-c"} <= set(d.connections.keys())
+            # ...and has learned a file it never saw uploaded.
+            assert d.manifest.get_file(file_id).name == src.name
+        finally:
+            for n in (hub, b, c, d):
+                if n is not None:
+                    await n.stop()
+
+
 # ---------------------------------------------------------------------------
 # Manifest entry tracking
 # ---------------------------------------------------------------------------
@@ -445,7 +490,7 @@ class TestFecDownloadAfterClusterShrink:
 
     async def test_fec_file_downloads_with_fewer_live_peers(self, tmp_path):
         """A file uploaded with erasure coding (5 nodes) must still download
-        after a peer goes offline (4 live nodes — below the FEC threshold).
+        after a peer goes offline (4 live nodes, below the FEC threshold).
 
         Before the fix, download re-derived the strategy from the live peer
         count and tried to read the FEC shares as replicated chunks.
@@ -569,3 +614,62 @@ class TestVerify:
                 await node.verify_file("0" * 64)
         finally:
             await node.stop()
+
+
+class TestVerifyFecThresholds:
+    """verify_file status boundaries for an erasure-coded entry."""
+
+    async def test_verify_status_at_exact_share_counts(self, tmp_path):
+        """healthy at N shares, degraded at exactly K, unrecoverable at K-1.
+
+        The shares and manifest entry are laid down by hand on a single
+        node so each share can be deleted individually; no cluster needed.
+        """
+        node = _make_node(tmp_path)
+
+        payload = os.urandom(4096)
+        shares = fec.encode(payload, 3, 5)  # K=3, N=5
+
+        infos = []
+        for i, share in enumerate(shares):
+            chunk_id = derive_chunk_id(share, node.network.hmac_key)
+            node.chunk_store.store(chunk_id, share)
+            infos.append(
+                ChunkInfo(
+                    chunk_id=chunk_id,
+                    integrity_hash=compute_integrity_hash(share),
+                    index=i,
+                    size=len(share),
+                    stored_on=[node.node_id],
+                )
+            )
+
+        node.manifest.add_file(
+            FileEntry(
+                file_id="fec-verify-boundary",
+                name="fec.bin",
+                size=len(payload),
+                chunk_count=1,
+                uploaded_at="2026-07-03T00:00:00+00:00",
+                uploaded_by=node.node_id,
+                chunks=infos,
+                fec_enabled=True,
+                replication_factor=1,
+            )
+        )
+
+        report = await node.verify_file("fec-verify-boundary")
+        assert report["status"] == "healthy"
+        assert report["available_chunks"] == 5
+
+        # N - K = 2 shares may vanish; at exactly K left it is degraded.
+        node.chunk_store.delete(infos[0].chunk_id)
+        node.chunk_store.delete(infos[1].chunk_id)
+        report = await node.verify_file("fec-verify-boundary")
+        assert report["status"] == "degraded"
+        assert report["available_chunks"] == 3
+
+        # One fewer than K and the file is gone.
+        node.chunk_store.delete(infos[2].chunk_id)
+        report = await node.verify_file("fec-verify-boundary")
+        assert report["status"] == "unrecoverable"

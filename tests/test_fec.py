@@ -66,3 +66,17 @@ def test_invalid_parameters():
         
     with pytest.raises(ValueError):
         encode(b"data", 5, 4)
+
+
+def test_k_inference_matches_encode_k():
+    """Download infers K as the smallest value whose share count reaches N.
+
+    That only works if compute_n maps every K to a distinct N, so check the
+    round trip for each K up to the distributor's cap of 170.
+    """
+    for k in range(1, 171):
+        n = compute_n(k)
+        inferred = 1
+        while compute_n(inferred) < n:
+            inferred += 1
+        assert inferred == k

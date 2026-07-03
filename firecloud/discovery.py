@@ -1,8 +1,4 @@
-"""FireCloud Discovery Engine.
-
-Implements mDNS peer discovery using zeroconf and config file-based peer listings
-as a fallback for LAN discovery.
-"""
+"""mDNS peer discovery via zeroconf, with a static peer-list fallback."""
 
 import asyncio
 import json
@@ -14,10 +10,10 @@ from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 
 
 def get_local_ip() -> str:
-    """Determine the local IPv4 address used for network traffic."""
+    """The IPv4 address this host routes outbound traffic from."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # Try connecting to an arbitrary IP to get our routing IP address
+        # UDP connect doesn't send anything; it just picks a source address.
         s.connect(("10.254.254.254", 1))
         ip = s.getsockname()[0]
     except Exception:
@@ -51,9 +47,8 @@ class FireCloudListener(ServiceListener):
     def _process_info(self, info: ServiceInfo) -> None:
         peer_node_id = info.name.split(".")[0]
         if peer_node_id == self.discovery.node_id:
-            return  # Skip self
+            return
 
-        # Parse properties
         props = info.properties
         net_id_bytes = props.get(b"network_id")
         if not net_id_bytes:
@@ -61,12 +56,11 @@ class FireCloudListener(ServiceListener):
 
         net_id = net_id_bytes.decode("utf-8")
         if net_id != self.discovery.network_id:
-            return  # Belong to a different network
+            return  # different network
 
         if not info.addresses:
             return
 
-        # Convert IP address bytes to string
         ip = socket.inet_ntoa(info.addresses[0])
         port = info.port
 
@@ -88,8 +82,8 @@ class LANDiscovery:
         self.on_removed_callback: Callable[[str], None] | None = None
 
     async def start(self) -> None:
-        """Register the node's mDNS service and start browsing for peers."""
-        # Use run_in_executor to avoid blocking the asyncio loop during Zeroconf init
+        """Register our mDNS service and start browsing for peers."""
+        # Zeroconf init blocks, so keep it off the event loop.
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._sync_start)
 
@@ -103,7 +97,7 @@ class LANDiscovery:
             addresses=[socket.inet_aton(local_ip)],
             port=self.port,
             properties={
-                b"version": b"0.1.0",
+                b"version": b"0.2.1",
                 b"network_id": self.network_id.encode("utf-8"),
             },
         )
@@ -158,7 +152,6 @@ class PeerConfig:
         """Save a list of static peer endpoints to a JSON file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Convert tuples to lists for standard JSON encoding
         data = [[host, port] for host, port in peers]
         with open(path, "w") as f:
             json.dump(data, f, indent=4)
