@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "firecloud-devnet"
-version = "0.2.0"
+version = "0.2.1"
 description = "Private, encrypted, distributed storage across your own machines"
 readme = "README.md"
 license = "MIT"
